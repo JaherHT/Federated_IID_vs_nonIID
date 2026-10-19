@@ -141,6 +141,13 @@ against a running server.
 - `consensus_final.npy` — final consensus probabilities (probabilities mode only)
 - `run_config.json` — full configuration of the run
 
+**Each client's copy:** on `FINISHED` a client writes
+`client_out/<client_id>_<timestamp>/` with `final_model.pt` (the final global
+weights it received; `consensus_final.npy` in probabilities mode),
+`client_metrics.csv` (its round-by-round local loss/accuracy/norm) and
+`client_summary.json`. The server's `runs/` stays the authoritative record;
+`client_out/` is that machine's own copy of the result.
+
 **Networks:**
 - **Server machine:** allow Python through the Windows firewall on the server port
   (5000 by default). `python tools/net_info.py` prints the address to share.

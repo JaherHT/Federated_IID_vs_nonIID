@@ -102,8 +102,11 @@ Exactly one of `targets` / `weights` is present, matching the announced mode.
 | delta     | dict    | FedAvg mode: name -> float32 ndarray, same keys and shapes as `weights`; `trained - received` |
 | aux       | dict    | scalars only; reference fields: local_loss, local_acc, distill_loss, probs_norm, delta_norm, clipped, train_seconds |
 
-**FINISHED (server -> client):** sent once after the last round. The client
-should exit cleanly.
+**FINISHED (server -> client):** sent once after the last round. Fields:
+`round` (last round number), `final_test_acc` (server-side accuracy on the
+held-out test set), and the final state itself - `weights` in FedAvg mode or
+`targets` in probabilities mode, same shape as in ROUND. The client saves its
+copy (final model or consensus) plus its per-round history and exits.
 
 **Round semantics (probabilities mode):**
 1. The server broadcasts ROUND `r` to every connected client. The clients to

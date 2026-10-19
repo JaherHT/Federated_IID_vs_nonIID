@@ -609,9 +609,16 @@ class Server:
         if self.consensus is not None:
             np.save(self.out_dir / "consensus_final.npy", self.consensus)
             log.info("saved final consensus: %s", self.out_dir / "consensus_final.npy")
+        payload = {"type": "FINISHED", "round": self.rounds}
+        if self.strategy == "fedavg":
+            payload["weights"] = self._weights_np()
+        else:
+            payload["targets"] = self.consensus
+        if self.metrics_rows:
+            payload["final_test_acc"] = float(self.metrics_rows[-1]["test_acc"])
         for state in self.alive():
             try:
-                state.conn.send({"type": "FINISHED"})
+                state.conn.send(payload)
             except Exception:
                 pass
         time.sleep(0.3)

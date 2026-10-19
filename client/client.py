@@ -22,10 +22,12 @@ Run from the repo root:
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 import logging
 import sys
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -61,6 +63,9 @@ class Client:
         self.debug_delay = cfg.get("debug_delay") or {}
         self.training_override = cfg.get("training_override") or {}
         log_file = cfg.get("log_file")
+        self.history: list = []
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.out_dir = Path(cfg.get("out_dir") or Path("client_out") / f"{self.client_id}_{stamp}")
 
         enc = cfg.get("encryption", {})
         self.key = protocol.load_key(enc.get("key_file", "secret.key")) if enc.get("enabled", True) else None
@@ -223,6 +228,7 @@ class Client:
             "train_seconds": _f(train_seconds),
         }
         aux = {k: v for k, v in aux.items() if v is not None}
+        self.history.append({"round": r, "n_train": int(self.n_train), **aux})
 
         conn.send({
             "type": "UPDATE",
@@ -287,6 +293,7 @@ class Client:
             "train_seconds": _f(train_seconds),
         }
         aux = {k: v for k, v in aux.items() if v is not None}
+        self.history.append({"round": r, "n_train": int(self.n_train), **aux})
 
         conn.send({
             "type": "UPDATE",
@@ -299,6 +306,48 @@ class Client:
         log.info("round %d: update sent (local_loss=%s distill_loss=%s probs_norm=%.3f clipped=%s | %.1f s)",
                  r, aux.get("local_loss"), aux.get("distill_loss"),
                  aux.get("probs_norm", 0.0), clipped, train_seconds)
+
+    # ---------------------------------------------------------------- outputs
+    def save_final(self, message: dict) -> None:
+        """Write this client's copy of the run: final model/consensus + history."""
+        try:
+            self.out_dir.mkdir(parents=True, exist_ok=True)
+            files = []
+            if "weights" in message:
+                weights = {name: torch.from_numpy(np.asarray(arr, dtype=np.float32))
+                           for name, arr in message["weights"].items()}
+                self.model.load_state_dict(weights)
+                path = self.out_dir / "final_model.pt"
+                torch.save(self.model.state_dict(), path)
+                files.append(path.name)
+            if message.get("targets") is not None:
+                path = self.out_dir / "consensus_final.npy"
+                np.save(path, np.asarray(message["targets"], dtype=np.float32))
+                files.append(path.name)
+            if self.history:
+                path = self.out_dir / "client_metrics.csv"
+                columns = ["round", "n_train", "local_loss", "local_acc", "distill_loss",
+                           "delta_norm", "probs_norm", "clipped", "train_seconds"]
+                with open(path, "w", newline="", encoding="utf-8") as handle:
+                    writer = csv.DictWriter(handle, fieldnames=columns, extrasaction="ignore")
+                    writer.writeheader()
+                    for row in self.history:
+                        writer.writerow({k: row.get(k, "") for k in columns})
+                files.append(path.name)
+            summary = {
+                "client_id": self.client_id,
+                "architecture": self.arch,
+                "shard_file": self.shard_file,
+                "n_train": int(self.n_train),
+                "rounds_done": len(self.history),
+                "final_test_acc": message.get("final_test_acc"),
+                "files": files,
+            }
+            (self.out_dir / "client_summary.json").write_text(
+                json.dumps(summary, indent=2), encoding="utf-8")
+            log.info("saved client artifacts: %s", self.out_dir)
+        except Exception as exc:
+            log.warning("could not save client artifacts: %s", exc)
 
     # ------------------------------------------------------------ connection
     def connected_loop(self) -> None:
@@ -337,6 +386,7 @@ class Client:
                 if mtype == "ROUND":
                     self.handle_round(message, conn)
                 elif mtype == "FINISHED":
+                    self.save_final(message)
                     log.info("run finished; exiting")
                     return
                 else:

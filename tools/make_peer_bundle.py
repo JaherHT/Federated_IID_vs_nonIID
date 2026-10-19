@@ -52,6 +52,8 @@ One client process, from this folder:
      change it if the server moves):
      .venv\\Scripts\\python -m client.client --config client\\config.json
      Keep it running; it reconnects by itself after network drops.
+     After FINISHED it writes client_out\\<id>_<timestamp>\\ (final model,
+     your round history, summary).
 
 Your file:  client\\config.json  ->  "architecture": "{arch}"
   Main runs are FedAvg: every machine uses the same shared model ("cnn"),

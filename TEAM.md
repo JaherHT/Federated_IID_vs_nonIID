@@ -61,7 +61,9 @@ model. Raw data never leaves a machine; only that machine's update does.
    .venv\Scripts\python tools\protocol_selftest.py --mode all
 3. **Join a session only after the self-check passes:**
    .venv\Scripts\python -m client.client --config client\config.json
-   Keep it running; it reconnects by itself after network drops.
+   Keep it running; it reconnects by itself after network drops. After
+   `FINISHED` it writes `client_out\<id>_<timestamp>\` (final model, your
+   round history, summary).
 4. **Optional:** training_override in your config (batch size, epochs, learning
    rate). Official runs use the server defaults.
 

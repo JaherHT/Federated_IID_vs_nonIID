@@ -12,6 +12,7 @@ secret.key
 # local artifacts: run evidence, peer zips, raw data, generated shards
 runs/*
 !runs/.gitkeep
+client_out/
 bundles/
 data/raw/*
 !data/raw/.gitkeep
