@@ -251,7 +251,8 @@ class Server:
         return True
 
     def wait_for_clients(self, listener: socket.socket) -> None:
-        deadline = time.time() + self.start_timeout_s
+        started = time.time()
+        deadline = started + self.start_timeout_s
         last_log = 0.0
         while True:
             self.accept_one(listener)
@@ -270,15 +271,17 @@ class Server:
                     log.warning("start timeout reached; starting anyway with %d client(s): %s",
                                 len(connected), sorted(s.client_id for s in connected))
                     break
-                log.warning("start timeout reached but fewer than %d client(s) connected; still waiting ...",
-                            self.min_clients)
+                log.warning("start timeout reached but fewer than %d client(s) connected; "
+                            "still waiting (next check in 30 s) ...", self.min_clients)
                 deadline = time.time() + 30
             elif time.time() - last_log > 15:
                 last_log = time.time()
                 target = self.expected_ids or f"{self.expected_clients} client(s)"
-                log.info("waiting for clients: have %s, waiting for %s",
-                         sorted(s.client_id for s in connected), missing or target)
-        log.info("run starting with clients: %s", sorted(s.client_id for s in self.alive()))
+                left = max(0, int(round(deadline - time.time())))
+                log.info("waiting for clients: have %s, waiting for %s (%ds left)",
+                         sorted(s.client_id for s in connected), missing or target, left)
+        log.info("run starting with clients: %s (after %.0f s)",
+                 sorted(s.client_id for s in self.alive()), time.time() - started)
 
     # ------------------------------------------------------------------ csvs
     def init_csvs(self) -> None:
@@ -438,6 +441,7 @@ class Server:
             loss, acc = self.evaluate()
             self.record_round(r, time.time() - started, len(self.alive()), 0, loss, acc, None)
             return
+        log.info("round %d: waiting up to %.0f s for %d client(s)", r, self.round_timeout_s, len(expected))
         updates = self.collect_updates(r, expected, listener)
         if self.strategy == "fedavg":
             self.apply_fedavg(updates, r, started)
@@ -520,6 +524,7 @@ class Server:
         pending = {s: True for s in expected}
         updates = []
         deadline = time.time() + self.round_timeout_s
+        last_log = 0.0
         while pending:
             remaining = deadline - time.time()
             if remaining <= 0:
@@ -528,6 +533,11 @@ class Server:
                 kind, state, payload = self.events.get(timeout=min(0.25, remaining))
             except queue.Empty:
                 self.accept_one(listener)  # register reconnecting clients promptly
+                now = time.time()
+                if now - last_log >= 5.0:
+                    last_log = now
+                    log.info("round %d: %d/%d update(s) received, %.0f s left",
+                             r, len(updates), len(expected), max(0.0, deadline - now))
                 continue
             if kind == "dead":
                 if state in pending:
