@@ -5,9 +5,7 @@ The reference implementation lives in `common/protocol.py`; this document is
 the contract. A client may be re-implemented, but it must match this spec
 byte for byte.
 
-## Framing
-
-Every message is a single frame:
+**Framing:** every message is a single frame.
 
 ```
 4 bytes   payload length N   (unsigned, big-endian)
@@ -17,11 +15,9 @@ N bytes   payload
 Payload = zlib-compressed UTF-8 JSON, then wrapped in a Fernet token.
 Maximum frame: 16 MB. Maximum size after decompression: 64 MB.
 
-## Serialization (safe by construction)
-
-The payload is plain data. There is no pickle, no eval, no imports, no file
-paths and no commands anywhere in this protocol; the receiving side rejects
-everything that is not in this list:
+**Serialization (safe by construction):** the payload is plain data. There is
+no pickle, no eval, no imports, no file paths and no commands anywhere in this
+protocol; the receiving side rejects everything that is not in this list:
 
 - JSON values: objects, arrays, strings, integers, finite floats, booleans, null
 - float32 numpy arrays, carried as
@@ -32,21 +28,18 @@ A float32 array is the only binary type on the wire. A typical UPDATE is
 2000 x 10 probabilities (~80 KB raw, less after zlib). Non-finite numbers
 (inf/nan) are rejected on both the sending and the receiving side.
 
-## Encryption
-
+**Encryption:**
 - Fernet (`cryptography` package): AES-128-CBC + HMAC-SHA256, symmetric.
 - One shared key file (`secret.key`, produced by `tools/gen_key.py`) identical
   on every machine. Never commit it to git.
 - Both ends must use the same key; a wrong key shows up as `InvalidToken` on
   the first message (and the server drops the connection).
 
-## Messages
-
-All messages are dicts with a `"type"` field. Every field listed below is
-validated by the server; a message that fails validation closes the
+**Messages:** all messages are dicts with a `"type"` field. Every field listed
+below is validated by the server; a message that fails validation closes the
 connection (see "What the server accepts").
 
-### HELLO  (client -> server; first message on every connection)
+**HELLO (client -> server; first message on every connection):**
 
 | field     | type | notes                                                       |
 |-----------|------|-------------------------------------------------------------|
@@ -57,7 +50,7 @@ connection (see "What the server accepts").
 | ready     | bool | must be true: model and data loaded before connecting       |
 | arch      | str  | short architecture name, 1..64 chars, e.g. "cnn"            |
 
-### WELCOME  (server -> client)
+**WELCOME (server -> client):**
 
 | field       | type | notes                       |
 |-------------|------|-----------------------------|
@@ -70,7 +63,7 @@ connection (see "What the server accepts").
 The client checks `public_size` against its own public file and refuses to
 join on a mismatch (all data files must come from the same build).
 
-### ROUND  (server -> client; start of every round)
+**ROUND (server -> client; start of every round):**
 
 | field    | type            | notes                                               |
 |----------|-----------------|-----------------------------------------------------|
@@ -79,7 +72,7 @@ join on a mismatch (all data files must come from the same build).
 | targets  | ndarray or null | consensus probabilities (public_size, 10) float32; null in round 1 |
 | config   | dict            | local_epochs, kd_epochs, temperature, batch_size, lr, optimizer; `clip_norm` when clipped updates are requested |
 
-### UPDATE  (client -> server; answer to a ROUND)
+**UPDATE (client -> server; answer to a ROUND):**
 
 | field     | type    | notes                                                        |
 |-----------|---------|--------------------------------------------------------------|
@@ -90,12 +83,10 @@ join on a mismatch (all data files must come from the same build).
 | probs     | ndarray | float32 (public_size, 10), values in [0, 1], rows sum ~= 1   |
 | aux       | dict    | scalars only; reference fields: local_loss, local_acc, distill_loss, probs_norm, clipped, train_seconds |
 
-### FINISHED  (server -> client)
+**FINISHED (server -> client):** sent once after the last round. The client
+should exit cleanly.
 
-Sent once after the last round. The client should exit cleanly.
-
-## Round semantics
-
+**Round semantics:**
 1. The server broadcasts ROUND `r` to every connected client. The clients to
    which the send succeeded form the "expected" set for the round.
 2. Each expected client, in order:
@@ -114,17 +105,14 @@ Sent once after the last round. The client should exit cleanly.
    and evaluates it on the held-out test set.
 5. The consensus is broadcast in the next round's `targets`.
 
-## Clipping (when `clip_norm` is configured)
+**Clipping (when `clip_norm` is configured):** when `config.clip_norm` is
+present in ROUND, the client must scale the deviation of its probabilities
+from the uniform distribution so its total L2 norm is at most `clip_norm`,
+then add the uniform layer back (this keeps every row a valid probability
+row). Report the pre-clip norm and whether clipping happened in
+`aux.probs_norm` / `aux.clipped`.
 
-When `config.clip_norm` is present in ROUND, the client must scale the
-deviation of its probabilities from the uniform distribution so its total L2
-norm is at most `clip_norm`, then add the uniform layer back (this keeps every
-row a valid probability row). Report the pre-clip norm and whether clipping
-happened in `aux.probs_norm` / `aux.clipped`.
-
-## What the server accepts
-
-Exactly this conversation, and nothing else:
+**What the server accepts:** exactly this conversation, and nothing else.
 
 - First message on a connection: HELLO with valid fields (known client_id,
   `ready` true, sane n_train). Anything else closes the connection.
@@ -138,8 +126,7 @@ There is no message that reads, writes or lists anything on the server
 machine, and none that executes anything. `tools/protocol_selftest.py
 --mode probe` verifies these refusals against a running server.
 
-## Disconnection and rejoin
-
+**Disconnection and rejoin:**
 - A client that misses `round_timeout_s` is skipped for that round but stays
   connected; a client whose connection dies is marked OFFLINE on the next
   failed read/write.
@@ -153,16 +140,12 @@ machine, and none that executes anything. `tools/protocol_selftest.py
 - Identity is `client_id`, never the IP address: a disabled/re-enabled network
   adapter may come back with a different IP.
 
-## Versioning
+**Versioning:** `proto: 1`. Increment it on any breaking change; the server
+logs mismatches and refuses the connection.
 
-`proto: 1`. Increment it on any breaking change; the server logs mismatches
-and refuses the connection.
-
-## Conformance testing
-
-`tools/protocol_selftest.py` checks any client implementation against a
-two-round test server (HELLO fields, one UPDATE per round, probability
-shape/dtype/range, distillation round included):
+**Conformance testing:** `tools/protocol_selftest.py` checks any client
+implementation against a two-round test server (HELLO fields, one UPDATE per
+round, probability shape/dtype/range, distillation round included):
 
 ```
 python tools/protocol_selftest.py --mode all      # reference client self-check

@@ -20,6 +20,7 @@ from __future__ import annotations
 import shutil
 import socket
 import subprocess
+from pathlib import Path
 
 
 def lan_ip():
@@ -42,8 +43,24 @@ def known_ipv4():
         return []
 
 
-def tailscale_ip():
+TAILSCALE_PATHS = (
+    r"C:\Program Files\Tailscale\tailscale.exe",
+    r"C:\Program Files (x86)\Tailscale\tailscale.exe",
+)
+
+
+def tailscale_exe():
     exe = shutil.which("tailscale")
+    if exe:
+        return exe
+    for candidate in TAILSCALE_PATHS:
+        if Path(candidate).exists():
+            return candidate
+    return None
+
+
+def tailscale_ip():
+    exe = tailscale_exe()
     if not exe:
         return None
     try:
@@ -63,16 +80,22 @@ def main() -> None:
     if primary:
         print(f"  {primary}")
     for extra in known_ipv4():
-        if extra != primary:
+        if extra != primary and not extra.startswith("100."):
             print(f"  (this machine also answers on {extra})")
     print()
     print("Different networks (Tailscale) - share this address:")
     ts_ip = tailscale_ip()
+    tailnet_ips = [ip for ip in known_ipv4() if ip.startswith("100.")]
     if ts_ip:
         print(f"  {ts_ip}")
+    elif tailnet_ips:
+        print(f"  {tailnet_ips[0]}   (Tailscale interface is up)")
     else:
         print("  Tailscale not found here. Install it on every machine, join the")
         print("  same network, then run this tool again and share the 100.x address.")
+    for extra in tailnet_ips:
+        if extra != ts_ip:
+            print(f"  (also on the tailnet: {extra})")
     print()
     print("Details and the full checklist: TEAM.md")
 

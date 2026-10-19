@@ -22,10 +22,13 @@ machines, over the local network or over the internet:
   public set** (2000 label-free images). The server averages them into one
   consensus and sends it back; clients distill from it before the next round.
   Weights never leave any machine; raw data never leaves any machine.
+- The scheme is the **federated-distillation family** (FedMD / FedDF style):
+  FedAvg averages parameter tensors, so it requires identical models on every
+  client; exchanging predictions instead lets each client keep its own
+  architecture.
 - Everything on the wire is **encrypted** (Fernet, one shared key file).
 
-## Layout
-
+**Layout:**
 ```
 common/       shared code, identical everywhere (model presets, data, protocol, privacy helpers)
 server/       the federated server (round loop, averaging, server-side model, evaluation)
@@ -35,10 +38,8 @@ tools/        gen_key, bench, protocol_selftest, make_peer_bundle, smoke_local, 
 runs/         outputs of every run (logs, csv, summary, models)
 ```
 
-## Requirements
-
-Python >= 3.10 (3.12 recommended). Dependencies: `numpy`, `torch`,
-`cryptography`. CPU is enough (the models are small).
+**Requirements:** Python >= 3.10 (3.12 recommended). Dependencies: `numpy`,
+`torch`, `cryptography`. CPU is enough (the models are small).
 
 ```
 python -m venv .venv
@@ -49,8 +50,7 @@ python -m venv .venv
 
 On Linux/macOS use `.venv/bin/pip` etc.
 
-## Quickstart
-
+**Quickstart:**
 1. `python data/prepare.py` — downloads Fashion-MNIST, builds every shard,
    the public set and the eval set.
 2. `python tools/gen_key.py` — creates `secret.key` (same file on every
@@ -65,9 +65,8 @@ Peer bundles: `python tools/make_peer_bundle.py` writes `bundles/peer_cN.zip`
 (code + that peer's shards + public set + `secret.key` + pre-filled config +
 `START_HERE.txt`). Send privately; the zips contain the key.
 
-## Running the two experiments
-
-Same dataset, same settings, same clients; only the partition changes:
+**Running the two experiments:** same dataset, same settings, same clients;
+only the partition changes.
 
 - **IID**: clients read `data/processed/iid/<id>.npz` (default in the shipped configs).
 - **non-IID**: switch `shard_file` in each client config to `data/processed/noniid/<id>.npz`.
@@ -82,8 +81,7 @@ Comparison material comes out of `runs/<timestamp>/`: `metrics.csv`
 losses, probabilities norm, participation), `summary.json`, `model_final.pt`,
 `consensus_final.npy`.
 
-## What is exchanged between the machines
-
+**What is exchanged between the machines:**
 - Server -> client: the consensus probabilities (averaged over clients) plus
   the round's training config.
 - Client -> server: the client's probabilities on the public set, `n_train`,
@@ -96,18 +94,16 @@ losses, probabilities norm, participation), `summary.json`, `model_final.pt`,
 
 Full details in `PROTOCOL.md`.
 
-## What the connection allows
+**What the connection allows:** the server accepts exactly one conversation:
+a HELLO handshake, then one UPDATE per round. Everything else — another
+client id, a not-ready client, unknown messages, malformed fields — is
+refused and the connection is closed (each refusal is logged with its
+reason). Payloads are plain data (JSON + float32 arrays): nothing received
+over the network is ever executed, imported or written to disk.
+`python tools/protocol_selftest.py --mode probe` proves these refusals
+against a running server.
 
-The server accepts exactly one conversation: a HELLO handshake, then one
-UPDATE per round. Everything else - another client id, a not-ready client,
-unknown messages, malformed fields - is refused and the connection is closed
-(each refusal is logged with its reason). Payloads are plain data (JSON +
-float32 arrays): nothing received over the network is ever executed, imported
-or written to disk. `python tools/protocol_selftest.py --mode probe` proves
-these refusals against a running server.
-
-## Outputs of every run (`runs/<timestamp>/`)
-
+**Outputs of every run (`runs/<timestamp>/`):**
 - `server.log` — full log of the run (including every disconnect/rejoin)
 - `metrics.csv` — round, wall time, participants, server-model test loss/accuracy
 - `client_metrics.csv` — per client per round: status (ok/miss/dead/bad-update), losses, probability norm, clipping
@@ -116,8 +112,7 @@ these refusals against a running server.
 - `consensus_final.npy` — final consensus probabilities
 - `run_config.json` — full configuration of the run
 
-## Networks
-
+**Networks:**
 - Server machine: allow Python through the Windows firewall on the server port
   (5000 by default). `python tools/net_info.py` prints the address to share.
 - Same network (lab, one Wi-Fi): share the printed LAN address (192.168.x.x or
@@ -131,8 +126,7 @@ these refusals against a running server.
 - The server accepts reconnections at any time; client identity is the
   `client_id`, never the IP, so reconnections survive a changed address.
 
-## Team notes
-
+**Team notes:**
 - Roles, duties, session steps: `TEAM.md`.
 - Custom client implementations are validated against `PROTOCOL.md` with
   `python tools/protocol_selftest.py --mode server`.
