@@ -30,13 +30,14 @@ INCLUDE_FILES = ["README.md", "PROTOCOL.md", "TEAM.md", "requirements.txt", ".gi
 
 # One architecture per client on purpose: each machine runs a different model.
 ARCHITECTURES = {"c1": "cnn", "c2": "cnn", "c3": "cnn", "c4": "cnn"}  # main scheme is FedAvg: one shared model
+SERVER_HOST = "100.70.85.123"  # Tailscale share address; peers edit only if the server moves
 
 START_HERE = """\
 START HERE - client '{client_id}'
 =================================
 
-You are client '{client_id}' of a 3-client federation (Fashion-MNIST,
-every client runs its own model). One client process, from this folder:
+You are client '{client_id}' of a 4-client federation (Fashion-MNIST).
+One client process, from this folder:
 
   1. python -m venv .venv
      .venv\\Scripts\\pip install -r requirements.txt
@@ -47,8 +48,8 @@ every client runs its own model). One client process, from this folder:
      .venv\\Scripts\\python tools\\bench.py
      .venv\\Scripts\\python tools\\protocol_selftest.py --mode all
 
-  3. Run: set "server_host" in client\\config.json (address from the group
-     chat; see TEAM.md for same-network vs different-network addresses), then:
+  3. Run (the server address is already set in client\\config.json; only
+     change it if the server moves):
      .venv\\Scripts\\python -m client.client --config client\\config.json
      Keep it running; it reconnects by itself after network drops.
 
@@ -109,7 +110,7 @@ def build_peer(peer: str, scenarios: list, out_dir: Path) -> Path:
         zf.write(public, arcname="data/processed/public.npz")
         zf.writestr("START_HERE.txt", START_HERE.format(client_id=peer, arch=ARCHITECTURES.get(peer, "cnn")))
         config = {
-            "server_host": "PUT-SERVER-IP-HERE",
+            "server_host": SERVER_HOST,
             "server_port": 5000,
             "client_id": peer,
             "architecture": ARCHITECTURES.get(peer, "cnn"),
