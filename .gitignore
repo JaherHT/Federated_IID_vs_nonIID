@@ -1,16 +1,24 @@
-# environments
-.venv/
-__pycache__/
-*.pyc
-.ipynb_checkpoints/
+# ======================================================================
+# The repo is shared with the team. Everything below stays ONLY on your
+# machine: it is excluded from git, so it never reaches the shared repo.
+# ======================================================================
+
+# your internal docs (plan, boundaries, checklists)
+private/
 
 # secrets: NEVER commit the key
 secret.key
 
-# generated / large files
-data/raw/*
-data/processed/**/*.npz
-!data/raw/.gitkeep
+# local artifacts: run evidence, peer zips, raw data, generated shards
 runs/*
 !runs/.gitkeep
 bundles/
+data/raw/*
+!data/raw/.gitkeep
+data/processed/**/*.npz
+
+# environments / caches
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/

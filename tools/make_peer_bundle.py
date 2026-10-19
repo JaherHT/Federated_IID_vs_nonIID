@@ -25,7 +25,7 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
 INCLUDE_DIRS = ["common", "server", "client", "tools"]
-INCLUDE_FILES = ["README.md", "PROTOCOL.md", "DELEGATION.md", "requirements.txt", ".gitignore"]
+INCLUDE_FILES = ["README.md", "PROTOCOL.md", "TEAM.md", "requirements.txt", ".gitignore"]
 
 START_HERE = """\
 START HERE - federated learning client '{client_id}'
@@ -52,7 +52,7 @@ Your shards (cleaned + split already; treat them as read-only):
      data\\processed\\noniid\\{client_id}.npz   (non-IID scenario)
 Switch scenarios by pointing shard_file in client\\config.json at the other file.
 
-Read DELEGATION.md (what is yours to decide vs. team contracts) and
+Read TEAM.md (what we are building and your part) and
 PROTOCOL.md (the wire format) before changing anything.
 """
 

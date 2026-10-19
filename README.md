@@ -28,7 +28,7 @@ system running across several machines on the local network:
 ```
 common/       shared code, identical everywhere (model, data, protocol, privacy)
 server/       the federated server (round loop, aggregation, DP, evaluation)
-client/       the reference client (peers may adapt or rewrite it; see DELEGATION.md)
+client/       the reference client (peers may adapt or rewrite it; see TEAM.md)
 data/         prepare.py + raw/ + processed/ (shards, test set, distributions.json)
 tools/        gen_key, bench, protocol_selftest, make_peer_bundle, smoke_local
 runs/         outputs of every run (logs, csv, summary, final model)
@@ -169,7 +169,7 @@ accountant.
 
 ## Team notes
 
-- Peers own their client code and their training overrides — see `DELEGATION.md`
-  for the exact split between "yours" and "team contract".
+- Peers own their client code and their training overrides: see `TEAM.md`
+  for the peer-facing split between "yours" and "team contract".
 - Custom client implementations can be validated against `PROTOCOL.md` with
   `python tools/protocol_selftest.py --mode server`.
