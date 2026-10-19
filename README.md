@@ -66,21 +66,38 @@ On Linux/macOS use `.venv/bin/pip` etc.
 5. Each client machine (edit `server_host` first):
    `python -m client.client --config client/config.json`
 
-Peer bundles: `python tools/make_peer_bundle.py` writes `bundles/peer_cN.zip`
+**Peer bundles:** `python tools/make_peer_bundle.py` writes `bundles/peer_cN.zip`
 (code + that peer's shards + public set + `secret.key` + pre-filled config +
 `START_HERE.txt`). Send privately; the zips contain the key.
+
+**Tools:** every script in `tools/` takes `--help`.
+- **gen_key.py:** writes `secret.key`. Run once by the server owner; every
+  machine uses that same file.
+- **bench.py:** times one round of client work on this machine (local epoch,
+  distillation, probabilities, evaluation); `--model all` covers every preset.
+  Run it before exam day and share the number with the group.
+- **protocol_selftest.py:** conformance check against `PROTOCOL.md`.
+  `--mode all` runs a reference client against a local test server (expect
+  `RESULT: PASS`); `--mode server` lets a custom client connect to
+  `127.0.0.1:5001`; `--mode probe` runs against a live server and proves that
+  junk, unknown ids and not-ready clients are refused.
+- **make_peer_bundle.py:** builds one zip per peer. Server owner only.
+- **smoke_local.py:** full local dry run (one server + two clients).
+  `--strategy logits`, `--drop c2`, `--slow c2`, `--dp`, `--rounds N`.
+- **net_info.py:** prints the addresses to share (LAN `192.168.x.x` and
+  Tailscale `100.x`).
 
 **Running the two experiments:** same dataset, same settings, same clients;
 only the partition changes.
 
-- **IID**: clients read `data/processed/iid/<id>.npz` (default in the shipped configs).
-- **non-IID**: switch `shard_file` in each client config to `data/processed/noniid/<id>.npz`.
-- Both partitions give each client 15,000 samples; IID is a shuffle, non-IID
-  sorts by label (2-3 classes per client). Evidence:
+- **IID:** clients read `data/processed/iid/<id>.npz` (default in the shipped configs).
+- **non-IID:** switch `shard_file` in each client config to `data/processed/noniid/<id>.npz`.
+- **Partition sizes:** each client gets 15,000 samples in both partitions; IID
+  is a shuffle, non-IID sorts by label (2-3 classes per client). Evidence:
   `data/processed/distributions.json`.
-- Main runs (FedAvg, default): 15 rounds with the default training config.
+- **Main runs (FedAvg, default):** 15 rounds with the default training config.
   Keep every other knob identical between the two runs.
-- Secondary runs (optional): the same pair again with `"strategy": "logits"`;
+- **Secondary runs (optional):** the same pair again with `"strategy": "logits"`;
   clients may then use different architectures. Compare methods as well as
   partitions (IID vs non-IID under each strategy).
 
@@ -91,17 +108,18 @@ update norm, participation), `summary.json`, `model_final.pt`, and
 
 **What is exchanged between the machines:** two modes, one protocol.
 
-- FedAvg mode (main): server -> the shared weights + round config; client ->
+- **FedAvg mode (main):** server -> the shared weights + round config; client ->
   weight delta, `n_train`, local scalars. Aggregation:
   `global += sum(n_k / sum(n)) * delta_k`; the server evaluates the updated
   model on the held-out test set.
-- Probabilities mode: server -> consensus probabilities + round config;
+- **Probabilities mode:** server -> consensus probabilities + round config;
   client -> probabilities on the public set, `n_train`, local scalars.
   Aggregation: `consensus = sum(n_k / sum(n)) * probs_k`; the server trains
   its own model toward that consensus.
-- A reconnected client simply continues: the next ROUND carries the current
-  state (weights or consensus) and nothing else needs reconciling.
-- Never exchanged: raw data, labels, another client's update.
+- **Reconnections:** a reconnected client simply continues; the next ROUND
+  carries the current state (weights or consensus) and nothing else needs
+  reconciling.
+- **Never exchanged:** raw data, labels, another client's update.
 
 Full details in `PROTOCOL.md`.
 
@@ -124,17 +142,17 @@ against a running server.
 - `run_config.json` — full configuration of the run
 
 **Networks:**
-- Server machine: allow Python through the Windows firewall on the server port
+- **Server machine:** allow Python through the Windows firewall on the server port
   (5000 by default). `python tools/net_info.py` prints the address to share.
-- Same network (lab, one Wi-Fi): share the printed LAN address (192.168.x.x or
+- **Same network (lab, one Wi-Fi):** share the printed LAN address (192.168.x.x or
   similar). A DHCP address is fine as long as it doesn't change mid-run.
-- Different networks (everyone at home): install Tailscale (or a similar mesh
+- **Different networks (everyone at home):** install Tailscale (or a similar mesh
   VPN) on all four machines, join one shared network, and share the printed
   100.x address instead. Nothing else changes; the address only goes into
   `server_host`.
-- Campus/guest Wi-Fi sometimes blocks device-to-device traffic: test early,
+- **Campus/guest Wi-Fi:** sometimes blocks device-to-device traffic; test early,
   keep a phone hotspot as fallback.
-- The server accepts reconnections at any time; client identity is the
+- **Reconnections:** the server accepts them at any time; client identity is the
   `client_id`, never the IP, so reconnections survive a changed address.
 
 **Team notes:**

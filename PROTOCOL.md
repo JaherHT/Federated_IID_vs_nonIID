@@ -1,6 +1,6 @@
 # Wire protocol v2
 
-Transport: plain TCP, one connection per client, initiated by the client.
+**Transport:** plain TCP, one connection per client, initiated by the client.
 The reference implementation lives in `common/protocol.py`; this document is
 the contract. A client may be re-implemented, but it must match this spec
 byte for byte.
@@ -38,7 +38,7 @@ both. Non-finite numbers (inf/nan) are rejected on both the sending and the
 receiving side.
 
 **Encryption:**
-- Fernet (`cryptography` package): AES-128-CBC + HMAC-SHA256, symmetric.
+- **Fernet (`cryptography` package):** AES-128-CBC + HMAC-SHA256, symmetric.
 - One shared key file (`secret.key`, produced by `tools/gen_key.py`) identical
   on every machine. Never commit it to git.
 - Both ends must use the same key; a wrong key shows up as `InvalidToken` on
@@ -118,7 +118,7 @@ should exit cleanly.
    passes. A client that did not answer is logged and skipped; the round still
    completes. A late update for a closed round is logged and ignored. The
    server never blocks on one client.
-4. Aggregation: sample-weighted mean of the received probability matrices
+4. **Aggregation:** sample-weighted mean of the received probability matrices
    (`sum over k of (n_k / sum(n)) * probs_k`). The server then trains its
    server-side model on the public set toward that consensus and evaluates it
    on the held-out test set.
@@ -129,7 +129,7 @@ should exit cleanly.
 2. Each expected client loads `weights` into its identical model, trains
    locally (`local_epochs`), computes `delta = trained - received`, and sends
    exactly one UPDATE `r`.
-3. Aggregation: `global += sum over k of (n_k / sum(n)) * delta_k`; the
+3. **Aggregation:** `global += sum over k of (n_k / sum(n)) * delta_k`; the
    server evaluates the updated global model and sends the weights again next
    round.
 
@@ -143,9 +143,9 @@ delta dict. Report the pre-clip norm and whether clipping happened in
 
 **What the server accepts:** exactly this conversation, and nothing else.
 
-- First message on a connection: HELLO with valid fields (known client_id,
+- **First message on a connection:** HELLO with valid fields (known client_id,
   `ready` true, sane n_train). Anything else closes the connection.
-- After that: one UPDATE per open round, with valid fields and either
+- **After that:** one UPDATE per open round, with valid fields and either
   probabilities of the exact expected shape and range, or a delta whose keys
   and shapes match the shared model. Anything else closes the connection.
 - Duplicate and late updates are ignored (not a violation).

@@ -21,7 +21,7 @@ model. Raw data never leaves a machine; only that machine's update does.
 - **Jaher**: server machine + client c3.
 - **Rolando**: client c1.
 - **Mayte**: client c2.
-- **[name]**: client c4.
+- **Darío**: client c4.
 
 **What each role does:**
 - **Server + c3:** runs the server for every session, posts the server address
