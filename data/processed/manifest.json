@@ -1,0 +1,27 @@
+{
+  "seed": 42,
+  "source": "https://raw.githubusercontent.com/zalandoresearch/fashion-mnist/master/data/fashion/",
+  "counts": {
+    "train": 60000,
+    "test": 10000,
+    "per_client": 20000,
+    "smoke_per_client": 2500
+  },
+  "dataset_stats": {
+    "mean": 0.286041,
+    "std": 0.353024
+  },
+  "files": {
+    "iid/c1.npz": "993d1cecd033d690fc85444b36578570371e0f3e0a3a3a01725e78cdd9139a4d",
+    "iid/c2.npz": "57aaedd69e9f3fd2af8d977a2b5c89ec700f34e5966c6762d09323a311cc8199",
+    "iid/c3.npz": "ec5b06295186062479f9440a1d1f784ee626732926b091e8bc068187ec4b0665",
+    "noniid/c1.npz": "ea1c22df2da6d42457e12a5b5b6fef1b1cdf615645e82ef0c508facd722225d3",
+    "noniid/c2.npz": "2164b7c2e49ebf126e62f63cb014c4a26dc62b6e12e6e725af4556c0784a0e10",
+    "noniid/c3.npz": "197c69a3ef93f22095b25a6f59110deb6c954aa90c42d22c36f79e5f64d5c97f",
+    "smoke/c1.npz": "ca90c00a4ab528b3fe883a40f71866c0acda3181f6677831fbecb90c331eb154",
+    "smoke/c2.npz": "fd40975be82ead45982492f67f30de978049d6da8a26f2545cf5449d91f8bba1",
+    "smoke/c3.npz": "7a647a287c1d873eefee4db3477a2efb611d3a0335f03143b43d86480b7269a8",
+    "smoke/test.npz": "8c8c4d3f316b0ec2ab56b3f16bbe1789a8c09c8c40220201749bddcc2f63ced9",
+    "test.npz": "47f8d6b13b5bd1359fcdc3bd2bc7ff8788a5c8d9d47109c91dd3c1c0b59257b0"
+  }
+}

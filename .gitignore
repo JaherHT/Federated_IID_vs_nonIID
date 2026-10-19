@@ -1,0 +1,16 @@
+# environments
+.venv/
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+
+# secrets: NEVER commit the key
+secret.key
+
+# generated / large files
+data/raw/*
+data/processed/**/*.npz
+!data/raw/.gitkeep
+runs/*
+!runs/.gitkeep
+bundles/

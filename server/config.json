@@ -1,0 +1,32 @@
+{
+  "network": {
+    "host": "0.0.0.0",
+    "port": 5000
+  },
+  "rounds": 15,
+  "expected_clients": 3,
+  "expected_client_ids": ["c1", "c2", "c3"],
+  "min_clients": 1,
+  "start_timeout_s": 300,
+  "round_timeout_s": 30,
+  "training": {
+    "local_epochs": 1,
+    "batch_size": 64,
+    "lr": 0.001,
+    "optimizer": "adam"
+  },
+  "dp": {
+    "enabled": false,
+    "clip_norm": 1.0,
+    "noise_sigma": 4.0,
+    "target_delta": 1e-05
+  },
+  "encryption": {
+    "enabled": true,
+    "key_file": "secret.key"
+  },
+  "paths": {
+    "test_file": "data/processed/test.npz",
+    "out_root": "runs"
+  }
+}

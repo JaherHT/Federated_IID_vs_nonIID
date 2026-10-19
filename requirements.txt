@@ -1,0 +1,8 @@
+# Python >= 3.10 (3.12 recommended)
+numpy>=1.26
+cryptography>=42.0
+torch>=2.2
+
+# CPU-only install of torch (smaller download, no CUDA):
+#   uv pip install torch --index-url https://download.pytorch.org/whl/cpu
+#   (or)  pip install torch --index-url https://download.pytorch.org/whl/cpu
