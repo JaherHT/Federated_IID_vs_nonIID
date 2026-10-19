@@ -5,12 +5,12 @@ The reference implementation lives in `common/protocol.py`; this document is
 the contract. A client may be re-implemented, but it must match this spec
 byte for byte.
 
-Two exchange modes share this protocol. The **probabilities mode** is the
-main one (federated distillation, heterogeneous client models). The **FedAvg
-mode** is the classic weight-delta exchange and needs one shared model on
-every machine. The server announces the mode in WELCOME and sends exactly one
-of `targets` / `weights` in each ROUND; the client answers in kind (`probs` /
-`delta`).
+Two exchange modes share this protocol. The **FedAvg mode** is the main one
+(classic weight-delta exchange; one shared model on every machine). The
+**probabilities mode** is the secondary one (federated distillation,
+heterogeneous client models). The server announces the mode in WELCOME and
+sends exactly one of `targets` / `weights` in each ROUND; the client answers
+in kind (`probs` / `delta`).
 
 **Framing:** every message is a single frame.
 

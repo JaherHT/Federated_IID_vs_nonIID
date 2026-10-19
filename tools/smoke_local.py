@@ -1,10 +1,10 @@
 """End-to-end local smoke test: one server + two clients on this machine.
 
-    python tools/smoke_local.py                  # 3 rounds, plain run
-    python tools/smoke_local.py --strategy fedavg  # weight exchange instead of probabilities
+    python tools/smoke_local.py                  # 3 rounds, plain FedAvg run
+    python tools/smoke_local.py --strategy logits  # probabilities exchange instead of weights
     python tools/smoke_local.py --drop c2        # kill a client mid-run, restart it later
     python tools/smoke_local.py --slow c2        # client freezes one round (server must time it out)
-    python tools/smoke_local.py --dp --rounds 3  # clipping + noise path on the consensus
+    python tools/smoke_local.py --dp --rounds 3  # clipping + noise path on the aggregated update
 
 Launches the real server and real clients as separate processes (small smoke
 files, so a run takes about a minute), watches the server log, and prints a
@@ -74,7 +74,7 @@ def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description="Local end-to-end smoke test")
     parser.add_argument("--rounds", type=int, default=None)
     parser.add_argument("--port", type=int, default=5099)
-    parser.add_argument("--strategy", choices=["logits", "fedavg"], default="logits")
+    parser.add_argument("--strategy", choices=["logits", "fedavg"], default="fedavg")
     parser.add_argument("--round-timeout", type=float, default=25.0, dest="round_timeout")
     parser.add_argument("--drop", default=None, metavar="CLIENT_ID",
                         help="kill this client mid-run and restart it a few seconds later")
@@ -117,7 +117,9 @@ def main(argv=None) -> None:
         "training": {"local_epochs": 1, "kd_epochs": 2, "temperature": 2.0,
                      "batch_size": 64, "lr": 0.001, "optimizer": "adam"},
         "model": {"architecture": "cnn", "distill_epochs": 2, "distill_lr": 0.001},
-        "dp": {"enabled": bool(args.dp), "clip_norm": 10.0, "noise_sigma": 1.0, "target_delta": 1e-5},
+        "dp": {"enabled": bool(args.dp),
+               "clip_norm": 0.5 if args.strategy == "fedavg" else 10.0,
+               "noise_sigma": 1.0, "target_delta": 1e-5},
         "encryption": {"enabled": True, "key_file": "secret.key"},
         "paths": {"public_file": "data/processed/smoke/public.npz",
                   "test_file": "data/processed/smoke/test.npz",

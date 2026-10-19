@@ -3,7 +3,7 @@
     "host": "0.0.0.0",
     "port": 5000
   },
-  "strategy": "logits",
+  "strategy": "fedavg",
   "rounds": 15,
   "expected_clients": 4,
   "expected_client_ids": ["c1", "c2", "c3", "c4"],
@@ -25,7 +25,7 @@
   },
   "dp": {
     "enabled": false,
-    "clip_norm": 30.0,
+    "clip_norm": 1.0,
     "noise_sigma": 4.0,
     "target_delta": 1e-05
   },

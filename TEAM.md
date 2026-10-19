@@ -6,17 +6,16 @@
   - one session where a client loses its network mid-run: the rest keeps going,
     and the client rejoins by itself when it is back
 
-**Two methods, one system:** the main runs exchange probabilities on the
-shared public set (each client its own architecture; weights never move).
-As a secondary task the same server can run classic FedAvg: clients send
-weight deltas and the server averages them. FedAvg needs one shared model,
-so for FedAvg sessions every machine switches to "architecture": "cnn".
+**Two methods, one system:** the main runs are classic FedAvg - every machine
+trains the same shared model and sends only weight deltas; the server averages
+them. As a secondary task the same server can run the probabilities exchange
+(federated distillation): clients send predictions on a shared public set and
+may each use a different architecture.
 
-**How it works (main runs):** every client trains its own model on its own
-shard, then sends only classification probabilities on a shared public set
-(2000 images, no labels). The server averages the probabilities into one
-consensus and sends it back; each client distills from it before the next
-round.
+**How it works (main runs):** each round the server sends the current shared
+weights; every client trains on its own shard, sends the delta
+(trained - received), and the server averages the deltas into the new global
+model. Raw data never leaves a machine; only that machine's update does.
 
 **Roles:**
 - **Jaher**: server machine + client c3.
@@ -29,16 +28,17 @@ round.
   and the round count in the group chat first, watches the server log, and
   runs client c3 on the same machine.
 - **Client c1 / c2 / c4:** run one client process during sessions and keep it
-  alive; choose their own architecture (presets: cnn | mlp | cnn_deep |
-  cnn_wide, or add a model in common/model.py; your machine, your model);
-  report their per-round numbers.
+  alive; main runs use the shared model (cnn, already set in your config);
+  for the secondary task you may switch to your own preset (cnn | mlp |
+  cnn_deep | cnn_wide, or add a model in common/model.py); report their
+  per-round numbers.
 
 **What you already have:**
 - this repo (same code on every machine)
 - your two shards, 15,000 samples each: data\processed\iid\ and data\processed\noniid\
-- data\processed\public.npz (the shared public set)
+- data\processed\public.npz (the shared public set; used by the secondary task)
 - secret.key (the protocol key; private, never share it outside the team)
-- a pre-filled client\config.json (server address, your shard, your architecture)
+- a pre-filled client\config.json (server address, your shard, shared model)
 
 **Connecting (both ways work; decide per session where everyone is):**
 - **Same network (lab, one Wi-Fi):** the server person runs tools\net_info.py and
@@ -67,16 +67,17 @@ round.
 
 **Rules:**
 - **The connection carries only this activity:** the server accepts a HELLO
-  handshake, then one UPDATE per round (your probabilities, or your weight
-  delta in FedAvg sessions). Anything else is refused and the connection is
-  closed. No file access and no remote commands, in either direction. Full
-  spec: PROTOCOL.md.
-- **FedAvg sessions:** every machine must use the same model. Set
-  "architecture": "cnn" in your config for those runs (the client refuses to
-  join a FedAvg session with a different model).
+  handshake, then one UPDATE per round (your weight delta in main runs, your
+  probabilities in the secondary task). Anything else is refused and the
+  connection is closed. No file access and no remote commands, in either
+  direction. Full spec: PROTOCOL.md.
+- **Main runs need one shared model:** keep "architecture": "cnn" in your
+  config. A client with a different model refuses to join a FedAvg session
+  (clear error on screen).
 - Keep secret.key out of chats, screenshots and git.
 - **Fixed team-wide:** PROTOCOL.md, the data files, and the public set.
-  Everything else in your client is yours (architecture included).
+  Everything else in your client is yours (secondary-task architecture
+  included).
 - **Everyone must be able to explain:** what is exchanged in each method, how
   the averaging works, what changes between IID and non-IID, and what happens
   when a client drops out.

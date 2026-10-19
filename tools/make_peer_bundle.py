@@ -29,7 +29,7 @@ INCLUDE_DIRS = ["common", "server", "client", "tools"]
 INCLUDE_FILES = ["README.md", "PROTOCOL.md", "TEAM.md", "requirements.txt", ".gitignore"]
 
 # One architecture per client on purpose: each machine runs a different model.
-ARCHITECTURES = {"c1": "cnn", "c2": "mlp", "c3": "cnn_deep", "c4": "cnn_wide"}
+ARCHITECTURES = {"c1": "cnn", "c2": "cnn", "c3": "cnn", "c4": "cnn"}  # main scheme is FedAvg: one shared model
 
 START_HERE = """\
 START HERE - client '{client_id}'
@@ -53,11 +53,11 @@ every client runs its own model). One client process, from this folder:
      Keep it running; it reconnects by itself after network drops.
 
 Your file:  client\\config.json  ->  "architecture": "{arch}"
-  Presets: cnn | mlp | cnn_deep | cnn_wide (common\\model.py). Swap freely,
-  or add your own model function there; different machines may run
-  different models.
-  Secondary task (FedAvg comparison): for FedAvg sessions every machine must
-  use the SAME model - set "architecture": "cnn" everywhere for those runs.
+  Main runs are FedAvg: every machine uses the same shared model ("cnn"),
+  already set here.
+  Secondary task (probabilities exchange): each machine MAY switch to a
+  different preset - cnn | mlp | cnn_deep | cnn_wide (common\\model.py) - or
+  add its own model function there.
 
 Your shards (read-only):
      data\\processed\\iid\\{client_id}.npz       (IID run)
