@@ -11,9 +11,9 @@ Outputs in data/processed/ (all arrays uint8):
                                (drawn from the test pool first)
     test.npz                   remaining 8000 test samples (X + y); the
                                server's held-out evaluation set
-    iid/c1.npz c2.npz c3.npz   IID split: one shuffle, three 20k shards
-    noniid/c1.npz ...          non-IID split: sorted by label, three 20k shards
-    smoke/{c1,c2,c3}.npz       tiny private shards for the local smoke test
+    iid/c1.npz ... c4.npz      IID split: one shuffle, four 15k shards
+    noniid/c1.npz ... c4.npz   non-IID split: sorted by label, four 15k shards
+    smoke/{c1..c4}.npz         tiny private shards for the local smoke test
     smoke/public.npz           tiny public set (600)
     smoke/test.npz             tiny eval set (400)
     distributions.json         class counts per client (the IID/non-IID evidence)
@@ -44,7 +44,7 @@ FILES = {
     "test_labels": "t10k-labels-idx1-ubyte.gz",
 }
 SEED = 42
-CLIENT_IDS = ["c1", "c2", "c3"]
+CLIENT_IDS = ["c1", "c2", "c3", "c4"]
 PUBLIC_SIZE = 2000
 SMOKE_SIZE = 2500
 SMOKE_PUBLIC_SIZE = 600

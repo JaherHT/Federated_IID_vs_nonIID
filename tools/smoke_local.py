@@ -1,6 +1,7 @@
 """End-to-end local smoke test: one server + two clients on this machine.
 
     python tools/smoke_local.py                  # 3 rounds, plain run
+    python tools/smoke_local.py --strategy fedavg  # weight exchange instead of probabilities
     python tools/smoke_local.py --drop c2        # kill a client mid-run, restart it later
     python tools/smoke_local.py --slow c2        # client freezes one round (server must time it out)
     python tools/smoke_local.py --dp --rounds 3  # clipping + noise path on the consensus
@@ -73,6 +74,7 @@ def main(argv=None) -> None:
     parser = argparse.ArgumentParser(description="Local end-to-end smoke test")
     parser.add_argument("--rounds", type=int, default=None)
     parser.add_argument("--port", type=int, default=5099)
+    parser.add_argument("--strategy", choices=["logits", "fedavg"], default="logits")
     parser.add_argument("--round-timeout", type=float, default=25.0, dest="round_timeout")
     parser.add_argument("--drop", default=None, metavar="CLIENT_ID",
                         help="kill this client mid-run and restart it a few seconds later")
@@ -105,6 +107,7 @@ def main(argv=None) -> None:
 
     server_cfg = {
         "network": {"host": "127.0.0.1", "port": args.port},
+        "strategy": args.strategy,
         "rounds": rounds,
         "expected_clients": len(clients),
         "expected_client_ids": clients,
@@ -113,7 +116,7 @@ def main(argv=None) -> None:
         "round_timeout_s": args.round_timeout,
         "training": {"local_epochs": 1, "kd_epochs": 2, "temperature": 2.0,
                      "batch_size": 64, "lr": 0.001, "optimizer": "adam"},
-        "proxy": {"architecture": "cnn", "epochs": 2, "lr": 0.001},
+        "model": {"architecture": "cnn", "distill_epochs": 2, "distill_lr": 0.001},
         "dp": {"enabled": bool(args.dp), "clip_norm": 10.0, "noise_sigma": 1.0, "target_delta": 1e-5},
         "encryption": {"enabled": True, "key_file": "secret.key"},
         "paths": {"public_file": "data/processed/smoke/public.npz",
@@ -126,7 +129,7 @@ def main(argv=None) -> None:
     for client_id in clients:
         cfg = {
             "server_host": "127.0.0.1", "server_port": args.port, "client_id": client_id,
-            "architecture": ARCHITECTURES.get(client_id, "cnn"),
+            "architecture": "cnn" if args.strategy == "fedavg" else ARCHITECTURES.get(client_id, "cnn"),
             "shard_file": f"data/processed/smoke/{client_id}.npz",
             "public_file": "data/processed/smoke/public.npz",
             "encryption": {"enabled": True, "key_file": "secret.key"},
@@ -146,8 +149,8 @@ def main(argv=None) -> None:
 
     try:
         print(f"[smoke] run dir: {run_dir}")
-        print(f"[smoke] rounds={rounds} port={args.port} round_timeout={args.round_timeout} "
-              f"drop={args.drop} slow={args.slow} dp={args.dp}")
+        print(f"[smoke] rounds={rounds} strategy={args.strategy} port={args.port} "
+              f"round_timeout={args.round_timeout} drop={args.drop} slow={args.slow} dp={args.dp}")
 
         procs["server"] = spawn(["-m", "server.server", "--config", str(server_cfg_path)],
                                 run_dir / "server_console.log")

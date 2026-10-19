@@ -15,10 +15,12 @@ Prove that a RUNNING server refuses anything that is not this activity
 
     python tools/protocol_selftest.py --mode probe --port 5000
 
-The test server does no federation: it runs two rounds, echoes the client's
-first probabilities back as the consensus for the second round, and validates
-every message against PROTOCOL.md (HELLO fields, exactly one UPDATE per
-round, probability shape/dtype/range, finite values, n_train > 0).
+The test server does no federation: it runs three rounds (two logits rounds,
+then one FedAvg weights round), echoes the client's first probabilities back
+as the consensus for the second round, and validates every message against
+PROTOCOL.md (HELLO fields, exactly one UPDATE per round, probability
+shape/dtype/range in logits rounds, delta keys/shapes in the FedAvg round,
+finite values, n_train > 0).
 
 Requires: secret.key (tools/gen_key.py) and the smoke files
 (data/prepare.py) for --mode all.
@@ -36,6 +38,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from common import protocol
+from common.model import build_model
 
 DEFAULT_PORT = 5001
 SMOKE_PUBLIC = "data/processed/smoke/public.npz"
@@ -81,14 +84,16 @@ def run_test_server(port: int, key: bytes, results: dict, timeout_s: float = 240
 
         hello = conn.recv()
         check("first message is HELLO", hello.get("type") == "HELLO", repr(hello.get("type")))
-        check("HELLO.proto == 1", int(hello.get("proto", -1)) == protocol.PROTO_VERSION)
+        check(f"HELLO.proto == {protocol.PROTO_VERSION}",
+              int(hello.get("proto", -1)) == protocol.PROTO_VERSION)
         check("HELLO.client_id present", bool(hello.get("client_id")), repr(hello.get("client_id")))
         check("HELLO.n_train > 0", int(hello.get("n_train", 0)) > 0, str(hello.get("n_train")))
         check("HELLO.ready is true", hello.get("ready") is True, repr(hello.get("ready")))
         check("HELLO.arch present", bool(hello.get("arch")), repr(hello.get("arch")))
 
-        conn.send({"type": "WELCOME", "proto": protocol.PROTO_VERSION, "total_rounds": 2,
-                   "public_size": n_public, "num_classes": 10})
+        conn.send({"type": "WELCOME", "proto": protocol.PROTO_VERSION, "total_rounds": 3,
+                   "public_size": n_public, "num_classes": 10, "strategy": "logits",
+                   "shared_model": "cnn"})
         conn.send({"type": "ROUND", "round": 1, "targets": None,
                    "config": {"local_epochs": 1, "kd_epochs": 0, "temperature": 2.0,
                               "batch_size": 64, "lr": 0.001, "optimizer": "adam"}})
@@ -115,6 +120,24 @@ def run_test_server(port: int, key: bytes, results: dict, timeout_s: float = 240
         check("round 2: UPDATE.round == 2", int(update2.get("round", -1)) == 2, str(update2.get("round")))
         problem2 = _check_summary(update2.get("probs"), n_public)
         check("round 2: probabilities valid after distillation", not problem2, problem2)
+
+        # third round: FedAvg weights exchange - the client must return a delta
+        weights = {name: tensor.detach().cpu().numpy().astype("float32")
+                   for name, tensor in build_model("cnn").state_dict().items()}
+        conn.send({"type": "ROUND", "round": 3, "weights": weights,
+                   "config": {"local_epochs": 1, "kd_epochs": 0, "temperature": 2.0,
+                              "batch_size": 64, "lr": 0.001, "optimizer": "adam"}})
+        update3 = conn.recv()
+        check("round 3: message is UPDATE", update3.get("type") == "UPDATE", repr(update3.get("type")))
+        check("round 3: UPDATE.round == 3", int(update3.get("round", -1)) == 3, str(update3.get("round")))
+        delta = update3.get("delta")
+        same_keys = isinstance(delta, dict) and set(delta.keys()) == set(weights.keys())
+        check("round 3 (FedAvg): delta keys match the shared model", same_keys)
+        if same_keys:
+            check("round 3 (FedAvg): delta shapes match",
+                  all(tuple(np.asarray(delta[k]).shape) == tuple(weights[k].shape) for k in weights))
+            check("round 3 (FedAvg): delta values are finite",
+                  all(bool(np.isfinite(np.asarray(delta[k])).all()) for k in weights))
 
         try:
             conn.send({"type": "FINISHED"})

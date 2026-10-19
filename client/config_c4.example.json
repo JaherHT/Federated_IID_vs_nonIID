@@ -1,0 +1,14 @@
+{
+  "server_host": "192.168.1.100",
+  "server_port": 5000,
+  "client_id": "c4",
+  "architecture": "cnn_wide",
+  "shard_file": "data/processed/iid/c4.npz",
+  "public_file": "data/processed/public.npz",
+  "encryption": {"enabled": true, "key_file": "secret.key"},
+  "connect_timeout_s": 10,
+  "retry_delay_s": 3,
+  "local_metrics": true,
+  "training_override": null,
+  "log_file": null
+}

@@ -3,9 +3,10 @@
     "host": "0.0.0.0",
     "port": 5000
   },
+  "strategy": "logits",
   "rounds": 15,
-  "expected_clients": 3,
-  "expected_client_ids": ["c1", "c2", "c3"],
+  "expected_clients": 4,
+  "expected_client_ids": ["c1", "c2", "c3", "c4"],
   "min_clients": 1,
   "start_timeout_s": 300,
   "round_timeout_s": 90,
@@ -17,10 +18,10 @@
     "lr": 0.001,
     "optimizer": "adam"
   },
-  "proxy": {
+  "model": {
     "architecture": "cnn",
-    "epochs": 2,
-    "lr": 0.001
+    "distill_epochs": 2,
+    "distill_lr": 0.001
   },
   "dp": {
     "enabled": false,

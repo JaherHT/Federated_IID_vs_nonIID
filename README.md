@@ -4,34 +4,39 @@ Machine Learning course project: a federated system running across several
 machines, over the local network or over the internet:
 
 ```
-                       SERVER  (consensus, server-side model, evaluation)
+                       SERVER  (aggregation, server-side model, evaluation)
                           |
-            --------------+--------------
-            |             |             |
-         client c1     client c2     client c3
-         own model     own model     own model
-         private       private       private
-         shard         shard         shard
-            |             |             |
-            --- probabilities on a shared public set ---
+            --------------+------------------------
+            |             |             |         |
+         client c1     client c2     client c3  client c4
+         own model     own model     own model  own model
+         private       private       private    private
+         shard         shard         shard      shard
+            |             |             |         |
+            --- two exchange modes: probabilities (main) or deltas (FedAvg) ---
 ```
 
-- Every client trains **its own architecture** (presets: cnn, mlp, cnn_deep;
-  add your own) on its private shard.
-- Each round, clients send only **classification probabilities on a shared
-  public set** (2000 label-free images). The server averages them into one
-  consensus and sends it back; clients distill from it before the next round.
-  Weights never leave any machine; raw data never leaves any machine.
-- The scheme is the **federated-distillation family** (FedMD / FedDF style):
-  FedAvg averages parameter tensors, so it requires identical models on every
-  client; exchanging predictions instead lets each client keep its own
-  architecture.
+- Every client trains **its own architecture** in the main mode (presets: cnn,
+  mlp, cnn_deep, cnn_wide; add your own) on its private shard.
+- **Main scheme (probabilities).** Each round, clients send only
+  classification probabilities on a shared public set (2000 label-free
+  images). The server averages them into one consensus and sends it back;
+  clients distill from it before the next round. Weights never leave any
+  machine; raw data never leaves any machine. This is the federated-
+  distillation family (FedMD / FedDF style) - FedAvg averages parameter
+  tensors, so it requires identical models, and we want different ones.
+- **Secondary scheme (FedAvg).** Set `"strategy": "fedavg"` in
+  `server/config.json` and every client uses the same model
+  (`"architecture": "cnn"`). Clients then send weight deltas, the server
+  averages them into the global model, and every client trains from it the
+  next round. Same rounds, same evaluation, same reporting - two extra
+  comparison rows at the end.
 - Everything on the wire is **encrypted** (Fernet, one shared key file).
 
 **Layout:**
 ```
 common/       shared code, identical everywhere (model presets, data, protocol, privacy helpers)
-server/       the federated server (round loop, averaging, server-side model, evaluation)
+server/       the federated server (round loop, aggregation, server-side model, evaluation)
 client/       the reference client (adapt or rewrite it; see TEAM.md)
 data/         prepare.py + raw/ + processed/ (shards, public set, eval set, distributions.json)
 tools/        gen_key, bench, protocol_selftest, make_peer_bundle, smoke_local, net_info
@@ -56,7 +61,8 @@ On Linux/macOS use `.venv/bin/pip` etc.
 2. `python tools/gen_key.py` — creates `secret.key` (same file on every
    machine, never committed).
 3. `python tools/smoke_local.py` — full server + 2 clients on this machine;
-   expect `RESULT: PASS`.
+   expect `RESULT: PASS`. Add `--strategy fedavg` to smoke-test the FedAvg
+   path too.
 4. Real run, server machine: `python -m server.server --config server/config.json`
 5. Each client machine (edit `server_host` first):
    `python -m client.client --config client/config.json`
@@ -70,27 +76,32 @@ only the partition changes.
 
 - **IID**: clients read `data/processed/iid/<id>.npz` (default in the shipped configs).
 - **non-IID**: switch `shard_file` in each client config to `data/processed/noniid/<id>.npz`.
-- Both partitions give each client 20,000 samples; IID is a shuffle, non-IID
-  sorts by label (~3 classes per client). Evidence:
+- Both partitions give each client 15,000 samples; IID is a shuffle, non-IID
+  sorts by label (2-3 classes per client). Evidence:
   `data/processed/distributions.json`.
-- Suggested protocol: 15 rounds (the default) with the default training
-  config. Keep every other knob identical between the two runs.
+- Main runs: 15 rounds (the default) with the default training config, strategy
+  `logits`. Keep every other knob identical between the two runs.
+- Secondary runs: the same pair again with `"strategy": "fedavg"` and
+  `"architecture": "cnn"` on every client. Compare methods as well as
+  partitions (IID vs non-IID under each strategy).
 
 Comparison material comes out of `runs/<timestamp>/`: `metrics.csv`
-(server-side model accuracy per round), `client_metrics.csv` (per-client
-losses, probabilities norm, participation), `summary.json`, `model_final.pt`,
-`consensus_final.npy`.
+(server-model accuracy per round), `client_metrics.csv` (per-client losses,
+update norm, participation), `summary.json`, `model_final.pt`, and
+`consensus_final.npy` (probabilities mode only).
 
-**What is exchanged between the machines:**
-- Server -> client: the consensus probabilities (averaged over clients) plus
-  the round's training config.
-- Client -> server: the client's probabilities on the public set, `n_train`,
-  and a few local scalars (losses, norm, timing).
-- Aggregation: `consensus = sum(n_k / sum(n)) * probs_k`; the server trains
-  its own model on the public set toward that consensus.
+**What is exchanged between the machines:** two modes, one protocol.
+
+- Probabilities mode: server -> consensus probabilities + round config;
+  client -> probabilities on the public set, `n_train`, local scalars.
+  Aggregation: `consensus = sum(n_k / sum(n)) * probs_k`; the server trains
+  its own model toward that consensus.
+- FedAvg mode: server -> the shared weights + round config; client -> weight
+  delta (`trained - received`), `n_train`, local scalars. Aggregation:
+  `global += sum(n_k / sum(n)) * delta_k`.
 - A reconnected client simply continues: the next ROUND carries the current
-  consensus and nothing else needs reconciling.
-- Never exchanged: raw data, labels, model weights, another client's update.
+  state (consensus or weights) and nothing else needs reconciling.
+- Never exchanged: raw data, labels, another client's update.
 
 Full details in `PROTOCOL.md`.
 
@@ -106,10 +117,10 @@ against a running server.
 **Outputs of every run (`runs/<timestamp>/`):**
 - `server.log` — full log of the run (including every disconnect/rejoin)
 - `metrics.csv` — round, wall time, participants, server-model test loss/accuracy
-- `client_metrics.csv` — per client per round: status (ok/miss/dead/bad-update), losses, probability norm, clipping
-- `summary.json` — final numbers + per-client miss counts
-- `model_final.pt` — final server-side model
-- `consensus_final.npy` — final consensus probabilities
+- `client_metrics.csv` — per client per round: status (ok/miss/dead/bad-update), losses, update norm, clipping
+- `summary.json` — final numbers, strategy, per-client miss counts
+- `model_final.pt` — final server-side model (the global model in FedAvg mode)
+- `consensus_final.npy` — final consensus probabilities (probabilities mode only)
 - `run_config.json` — full configuration of the run
 
 **Networks:**
@@ -129,4 +140,5 @@ against a running server.
 **Team notes:**
 - Roles, duties, session steps: `TEAM.md`.
 - Custom client implementations are validated against `PROTOCOL.md` with
-  `python tools/protocol_selftest.py --mode server`.
+  `python tools/protocol_selftest.py --mode server` (it exercises both the
+  probabilities round and the FedAvg delta round).

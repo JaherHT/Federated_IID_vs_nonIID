@@ -8,6 +8,7 @@ Presets (all take (1, 28, 28) input and output 10 logits):
   cnn        small 2-conv CNN, ~20k parameters
   mlp        fully connected 784-256-64-10, ~218k parameters
   cnn_deep   3-conv CNN, ~90k parameters
+  cnn_wide   5x5 + 3x3 conv with a 64-unit head, ~221k parameters
 
 Add your own: write a function returning an nn.Module, add it to MODELS,
 done. Only your own client uses it; nothing else in the system depends on it.
@@ -59,7 +60,22 @@ def cnn_deep(num_classes: int = 10) -> nn.Module:
     )
 
 
-MODELS = {"cnn": cnn, "mlp": mlp, "cnn_deep": cnn_deep}
+def cnn_wide(num_classes: int = 10) -> nn.Module:
+    return nn.Sequential(
+        nn.Conv2d(1, 32, kernel_size=5, padding=2),
+        nn.ReLU(),
+        nn.MaxPool2d(2),
+        nn.Conv2d(32, 64, kernel_size=3, padding=1),
+        nn.ReLU(),
+        nn.MaxPool2d(2),
+        nn.Flatten(),
+        nn.Linear(64 * 7 * 7, 64),
+        nn.ReLU(),
+        nn.Linear(64, num_classes),
+    )
+
+
+MODELS = {"cnn": cnn, "mlp": mlp, "cnn_deep": cnn_deep, "cnn_wide": cnn_wide}
 
 
 def build_model(name: str = "cnn", num_classes: int = 10) -> nn.Module:

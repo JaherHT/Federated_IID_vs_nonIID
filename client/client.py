@@ -165,6 +165,77 @@ class Client:
         return np.concatenate(chunks, axis=0)
     # ----------------------------------------------------------------- round
     def handle_round(self, message: dict, conn: protocol.Connection) -> None:
+        if "weights" in message:
+            self.handle_round_weights(message, conn)
+        elif "targets" in message:
+            self.handle_round_probs(message, conn)
+        else:
+            raise protocol.ProtocolError("ROUND carries neither weights nor targets")
+
+    def handle_round_weights(self, message: dict, conn: protocol.Connection) -> None:
+        """FedAvg round: load the shared weights, train, send the delta."""
+        r = int(message["round"])
+        plan = self._training_plan(message.get("config"))
+        started = time.time()
+
+        received = {name: np.asarray(arr, dtype=np.float32)
+                    for name, arr in message["weights"].items()}
+        try:
+            self.model.load_state_dict({name: torch.from_numpy(arr) for name, arr in received.items()})
+        except Exception as exc:
+            raise protocol.ProtocolError(
+                f"received weights do not fit architecture '{self.arch}' ({exc}); "
+                "FedAvg runs need the shared model on every client") from exc
+
+        local_loss = None
+        if int(plan["local_epochs"]) > 0:
+            local_loss = self.train_local(plan)
+
+        trained = {name: tensor.detach().cpu().numpy().astype(np.float32)
+                   for name, tensor in self.model.state_dict().items()}
+        delta = {name: (trained[name] - received[name]).astype(np.float32) for name in received}
+        delta_norm = privacy.l2_norm_dict(delta)
+        clipped = False
+        clip_norm = plan.get("clip_norm")
+        if clip_norm is not None:
+            delta, clipped, delta_norm = privacy.clip_dict(delta, float(clip_norm))
+
+        train_seconds = time.time() - started
+        if self.debug_delay.get("round") == r:
+            sleep_s = float(self.debug_delay.get("sleep_s", 0.0))
+            if sleep_s > 0:
+                log.warning("debug_delay active: holding the round-%d update for %.0f s", r, sleep_s)
+                time.sleep(sleep_s)
+
+        if not all(bool(np.isfinite(arr).all()) for arr in delta.values()):
+            log.error("round %d: model produced a non-finite delta; skipping this update", r)
+            return
+
+        local_acc = None
+        if self.cfg.get("local_metrics", True):
+            _, local_acc = data_mod.evaluate(self.model, self.shard_path)
+
+        aux = {
+            "local_loss": _f(local_loss),
+            "local_acc": _f(local_acc),
+            "delta_norm": _f(delta_norm),
+            "clipped": bool(clipped),
+            "train_seconds": _f(train_seconds),
+        }
+        aux = {k: v for k, v in aux.items() if v is not None}
+
+        conn.send({
+            "type": "UPDATE",
+            "round": r,
+            "client_id": self.client_id,
+            "n_train": int(self.n_train),
+            "delta": delta,
+            "aux": aux,
+        })
+        log.info("round %d: delta sent (local_loss=%s delta_norm=%.3f clipped=%s | %.1f s)",
+                 r, aux.get("local_loss"), aux.get("delta_norm", 0.0), clipped, train_seconds)
+
+    def handle_round_probs(self, message: dict, conn: protocol.Connection) -> None:
         r = int(message["round"])
         plan = self._training_plan(message.get("config"))
         started = time.time()
@@ -251,8 +322,15 @@ class Client:
                     f"public set mismatch: server expects {expected_public} samples, "
                     f"your '{self.public_file}' has {int(self.public_X.shape[0])}; "
                     "re-extract your bundle so all data files come from the same build")
-            log.info("connected: %s rounds planned, public set %d samples, %d classes",
-                     welcome.get("total_rounds"), expected_public, int(welcome.get("num_classes", 10)))
+            strategy = str(welcome.get("strategy", "logits"))
+            shared = welcome.get("shared_model")
+            if strategy == "fedavg" and shared and self.arch != shared:
+                raise SystemExit(
+                    f"the server runs FedAvg with the shared model '{shared}'; you are '{self.arch}'. "
+                    f"Set \"architecture\": \"{shared}\" in client/config.json for FedAvg runs.")
+            log.info("connected: strategy=%s | %s rounds planned, public set %d samples, %d classes",
+                     strategy, welcome.get("total_rounds"), expected_public,
+                     int(welcome.get("num_classes", 10)))
             while True:
                 message = conn.recv()
                 mtype = message.get("type")

@@ -1,4 +1,4 @@
-"""Wire protocol v1: framing, safe serialization, encryption.
+"""Wire protocol v2: framing, safe serialization, encryption.
 
 Every message is one frame:
 
@@ -30,7 +30,7 @@ import zlib
 import numpy as np
 from cryptography.fernet import Fernet
 
-PROTO_VERSION = 1
+PROTO_VERSION = 2
 MAX_MESSAGE_BYTES = 16 * 1024 * 1024
 MAX_DECOMPRESSED_BYTES = 64 * 1024 * 1024
 

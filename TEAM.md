@@ -1,33 +1,41 @@
 # TEAM: Federated Learning, IID vs non-IID (Fashion-MNIST)
 
 **Goal:** the group activity, working end to end on our four machines.
-  - a distributed federated system (one server, three clients, each on its own computer)
+  - a distributed federated system (one server, four clients; c3 runs on the server machine)
   - an IID run and a non-IID run, measured the same way, compared and explained
   - one session where a client loses its network mid-run: the rest keeps going,
     and the client rejoins by itself when it is back
 
-**How it works:** every client trains its own model on its own shard, then sends
-only classification probabilities on a shared public set (2000 images, no
-labels). The server averages the probabilities into one consensus and sends it
-back; each client distills from it before the next round. Model weights never
-leave any machine, so every client may use a different architecture.
+**Two methods, one system:** the main runs exchange probabilities on the
+shared public set (each client its own architecture; weights never move).
+As a secondary task the same server can run classic FedAvg: clients send
+weight deltas and the server averages them. FedAvg needs one shared model,
+so for FedAvg sessions every machine switches to "architecture": "cnn".
 
-Roles:
+**How it works (main runs):** every client trains its own model on its own
+shard, then sends only classification probabilities on a shared public set
+(2000 images, no labels). The server averages the probabilities into one
+consensus and sends it back; each client distills from it before the next
+round.
+
+**Roles:**
 - **Jaher**: server machine + client c3.
 - **Rolando**: client c1.
 - **Mayte**: client c2.
+- **[name]**: client c4.
 
 **What each role does:**
-- **Server + c3:** runs the server for every session, posts the server address and
-  the round count in the group chat first, watches the server log, and runs
-  client c3 on the same machine.
-- **Client c1 / c2:** run one client process during sessions and keep it alive;
-  choose their own architecture (presets: cnn | mlp | cnn_deep, or add a model
-  in common/model.py; your machine, your model); report their per-round numbers.
+- **Server + c3:** runs the server for every session, posts the server address
+  and the round count in the group chat first, watches the server log, and
+  runs client c3 on the same machine.
+- **Client c1 / c2 / c4:** run one client process during sessions and keep it
+  alive; choose their own architecture (presets: cnn | mlp | cnn_deep |
+  cnn_wide, or add a model in common/model.py; your machine, your model);
+  report their per-round numbers.
 
 **What you already have:**
 - this repo (same code on every machine)
-- your two shards, 20,000 samples each: data\processed\iid\ and data\processed\noniid\
+- your two shards, 15,000 samples each: data\processed\iid\ and data\processed\noniid\
 - data\processed\public.npz (the shared public set)
 - secret.key (the protocol key; private, never share it outside the team)
 - a pre-filled client\config.json (server address, your shard, your architecture)
@@ -43,7 +51,7 @@ Roles:
   Port stays 5000. Campus Wi-Fi is sometimes blocked between devices (test it);
   a phone hotspot is the fallback.
 
-**Client steps (c1, c2):**
+**Client steps (c1, c2, c4):**
 1. **Setup (Windows, repo root):**
    python -m venv .venv
    .venv\Scripts\pip install -r requirements.txt
@@ -59,12 +67,16 @@ Roles:
 
 **Rules:**
 - **The connection carries only this activity:** the server accepts a HELLO
-  handshake, then one UPDATE per round (your probabilities). Anything else is
-  refused and the connection is closed. No file access and no remote commands,
-  in either direction. Full spec: PROTOCOL.md.
+  handshake, then one UPDATE per round (your probabilities, or your weight
+  delta in FedAvg sessions). Anything else is refused and the connection is
+  closed. No file access and no remote commands, in either direction. Full
+  spec: PROTOCOL.md.
+- **FedAvg sessions:** every machine must use the same model. Set
+  "architecture": "cnn" in your config for those runs (the client refuses to
+  join a FedAvg session with a different model).
 - Keep secret.key out of chats, screenshots and git.
-- **Fixed team-wide:** PROTOCOL.md, the data files, and the public set. Everything
-  else in your client is yours (architecture included).
-- **Everyone must be able to explain:** what is exchanged, how the averaging
-  works, what changes between IID and non-IID, and what happens when a client
-  drops out.
+- **Fixed team-wide:** PROTOCOL.md, the data files, and the public set.
+  Everything else in your client is yours (architecture included).
+- **Everyone must be able to explain:** what is exchanged in each method, how
+  the averaging works, what changes between IID and non-IID, and what happens
+  when a client drops out.
