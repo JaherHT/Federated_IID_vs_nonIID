@@ -1,7 +1,7 @@
 # Federated Learning: IID vs non-IID (Fashion-MNIST)
 
-Practical exam project for the Machine Learning course. A real federated
-system running across several machines on the local network:
+Machine Learning course project: a federated system running across several
+machines on the local network:
 
 ```
                        SERVER  (global model, aggregation, evaluation)
@@ -16,9 +16,9 @@ system running across several machines on the local network:
 ```
 
 - One small CNN (20,490 parameters, ~80 KB per update) shared by all machines.
-- **FedAvg**: every round, clients train a little on their own shard and send
-  their update to the server; the server averages and broadcasts the new
-  global weights. Raw data never leaves a machine.
+- **FedAvg**: each round, clients train on their own shard and send weights to
+  the server; the server averages them and broadcasts the new global model.
+  Raw data never leaves a machine.
 - Everything on the wire is **encrypted** (Fernet, one shared key file).
 
 ## Layout
@@ -26,7 +26,7 @@ system running across several machines on the local network:
 ```
 common/       shared code, identical everywhere (model, data, protocol)
 server/       the federated server (round loop, aggregation, evaluation)
-client/       the reference client (peers may adapt or rewrite it; see TEAM.md)
+client/       the reference client (adapt or rewrite it; see TEAM.md)
 data/         prepare.py + raw/ + processed/ (shards, test set, distributions.json)
 tools/        gen_key, bench, protocol_selftest, make_peer_bundle, smoke_local
 runs/         outputs of every run (logs, csv, summary, final model)
@@ -55,21 +55,19 @@ On Linux/macOS use `.venv/bin/pip` etc.
 5. Each client machine (edit `server_host` first):
    `python -m client.client --config client/config_c1.json`
 
-To distribute the work: `python tools/make_peer_bundle.py` produces
-`bundles/peer_c1.zip` etc. — each bundle carries the code, that peer's
-shards, `secret.key`, a pre-filled client config and a `START_HERE.txt`.
-Hand them out privately over chat/USB (they contain the key).
+Peer bundles: `python tools/make_peer_bundle.py` writes `bundles/peer_cN.zip`
+(code + that peer's shards + `secret.key` + pre-filled config +
+`START_HERE.txt`). Send privately; the zips contain the key.
 
 ## Running the two experiments
 
-Same dataset, same model, same settings; only the partition changes (the
-exam's central control):
+Same dataset, same model, same settings; only the partition changes:
 
 - **IID**: clients read `data/processed/iid/<id>.npz` (default in the shipped configs).
 - **non-IID**: switch `shard_file` in each client config to `data/processed/noniid/<id>.npz`.
-- Both partitions give each client 20,000 training samples; the IID one is a
-  shuffle, the non-IID one sorts by label, so each client ends up with ~3
-  classes. Evidence is in `data/processed/distributions.json`.
+- Both partitions give each client 20,000 samples; IID is a shuffle, non-IID
+  sorts by label (~3 classes per client). Evidence:
+  `data/processed/distributions.json`.
 - Suggested protocol: 15 rounds, 1 local epoch, Adam lr 1e-3 (the defaults).
   Keep every other knob identical between the two runs.
 
@@ -109,11 +107,10 @@ Full details in `PROTOCOL.md`.
   campus/guest Wi-Fi networks block device-to-device traffic: test early, and
   keep a phone hotspot as fallback.
 - The server accepts reconnections at any time; client identity is the
-  `client_id`, never the IP, so a re-enabled adapter with a new address is fine.
+  `client_id`, never the IP, so reconnections survive a changed address.
 
 ## Team notes
 
-- Peers own their client code and their training overrides: see `TEAM.md`
-  for the peer-facing split between "yours" and "team contract".
-- Custom client implementations can be validated against `PROTOCOL.md` with
+- Roles, client ownership, and team contracts: `TEAM.md`.
+- Custom client implementations are validated against `PROTOCOL.md` with
   `python tools/protocol_selftest.py --mode server`.

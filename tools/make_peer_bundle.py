@@ -28,32 +28,33 @@ INCLUDE_DIRS = ["common", "server", "client", "tools"]
 INCLUDE_FILES = ["README.md", "PROTOCOL.md", "TEAM.md", "requirements.txt", ".gitignore"]
 
 START_HERE = """\
-START HERE - federated learning client '{client_id}'
-====================================================
+START HERE - client '{client_id}'
+=================================
 
-You are client '{client_id}' of a 3-client federation with a shared small CNN
-(Fashion-MNIST). Setup (Windows, from this folder):
+You are client '{client_id}' of a 3-client federation (shared CNN,
+Fashion-MNIST). One client process, from this folder:
 
   1. python -m venv .venv
      .venv\\Scripts\\pip install -r requirements.txt
-     (CPU torch is fine and smaller: 
+     (CPU-only torch, smaller download: 
       .venv\\Scripts\\pip install torch --index-url https://download.pytorch.org/whl/cpu)
 
-  2. Self-check; both must end with PASS (or sensible numbers):
+  2. Self-check; expect RESULT: PASS:
      .venv\\Scripts\\python tools\\bench.py
      .venv\\Scripts\\python tools\\protocol_selftest.py --mode all
 
-  3. Join the group run. Ask for the server IP in the group chat, put it in
-     client\\config.json under "server_host", then:
+  3. Run: set "server_host" in client\\config.json (address from the group
+     chat), then:
      .venv\\Scripts\\python -m client.client --config client\\config.json
+     Keep it running; it reconnects by itself after network drops.
 
-Your shards (cleaned + split already; treat them as read-only):
-     data\\processed\\iid\\{client_id}.npz      (IID scenario)
-     data\\processed\\noniid\\{client_id}.npz   (non-IID scenario)
-Switch scenarios by pointing shard_file in client\\config.json at the other file.
+Your shards (read-only):
+     data\\processed\\iid\\{client_id}.npz       (IID run)
+     data\\processed\\noniid\\{client_id}.npz    (non-IID run)
+Switch runs by pointing shard_file in client\\config.json at the other file.
 
-Read TEAM.md (what we are building and your part) and
-PROTOCOL.md (the wire format) before changing anything.
+secret.key in this folder is the shared key; keep it private.
+Details: TEAM.md (roles, duties, steps) and PROTOCOL.md (wire format).
 """
 
 
