@@ -13,6 +13,7 @@ secret.key
 runs/*
 !runs/.gitkeep
 client_out/
+client/config.json
 bundles/
 data/raw/*
 !data/raw/.gitkeep

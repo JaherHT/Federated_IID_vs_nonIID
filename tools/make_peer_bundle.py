@@ -88,6 +88,8 @@ def collect_code_files() -> list:
             continue
         for path in sorted(base.rglob("*")):
             if path.is_file() and "__pycache__" not in path.parts and path.suffix != ".pyc":
+                if path.name == "config.json" and path.parent.name == "client":
+                    continue  # local c3 config; bundles get their own pre-filled one
                 files.append(path.relative_to(REPO_ROOT))
     for name in INCLUDE_FILES:
         path = REPO_ROOT / name
