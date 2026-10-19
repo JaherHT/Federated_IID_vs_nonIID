@@ -8,7 +8,7 @@ What one round looks like, from the client side:
   1. receive ROUND (current global weights + training config)
   2. train locally for the given number of epochs on your own shard
   3. delta = weights after training - weights before training
-  4. if the round config carries a clip_norm (DP on), clip the delta to that
+  4. if the round config carries a clip_norm (requested by the server), clip the delta to that
      L2 norm before sending
   5. send UPDATE with the delta + your local metrics
 

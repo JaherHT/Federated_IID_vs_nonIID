@@ -59,7 +59,7 @@ All messages are dicts with a `"type"` field. Unknown extra fields are ignored
 | type   | str  | "ROUND"                                                     |
 | round  | int  | 1-based round number                                        |
 | weights| dict | current global weights: name -> float32 ndarray             |
-| config | dict | training settings: local_epochs, batch_size, lr, optimizer, and `clip_norm` when DP is enabled |
+| config | dict | training settings: local_epochs, batch_size, lr, optimizer, and `clip_norm` when clipped updates are requested |
 
 ### UPDATE  (client -> server; answer to a ROUND)
 
@@ -92,12 +92,12 @@ Weighted mean of the received deltas:
 
 ```
 delta_avg = sum over received k of (n_k / sum(n)) * delta_k
-global    = global + delta_avg          (+ optional DP noise, see below)
+global    = global + delta_avg
 ```
 
 Clients never see each other's data or updates; only the server aggregates.
 
-## Clipping (required when DP is enabled)
+## Clipping (when `clip_norm` is configured)
 
 When `config.clip_norm` is present in ROUND, the client must scale its delta so
 its total L2 norm is at most `clip_norm` before sending
