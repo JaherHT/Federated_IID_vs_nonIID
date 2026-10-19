@@ -3,14 +3,14 @@
     python tools/smoke_local.py                  # 3 rounds, plain run
     python tools/smoke_local.py --drop c2        # kill a client mid-run, restart it later
     python tools/smoke_local.py --slow c2        # client freezes one round (server must time it out)
-    python tools/smoke_local.py --dp --rounds 3  # clipping + DP noise path
+    python tools/smoke_local.py --dp --rounds 3  # clipping + noise path on the consensus
 
 Launches the real server and real clients as separate processes (small smoke
-shards, so a run takes about a minute), watches the server log, and prints a
+files, so a run takes about a minute), watches the server log, and prints a
 PASS/FAIL checklist. With --drop / --slow it also reproduces the exam's
 disconnection test locally.
 
-Requires: secret.key (tools/gen_key.py) and smoke shards (data/prepare.py).
+Requires: secret.key (tools/gen_key.py) and smoke files (data/prepare.py).
 Logs and outputs land in runs/smoke_<timestamp>/.
 """
 from __future__ import annotations
@@ -26,6 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+ARCHITECTURES = {"c1": "cnn", "c2": "mlp"}  # two different models on purpose
 
 
 def wait_for(path: Path, pattern: str, timeout_s: float) -> bool:
@@ -79,14 +80,14 @@ def main(argv=None) -> None:
                         help="this client holds its round-1 update (server must time it out)")
     parser.add_argument("--drop-after", type=float, default=2.5, dest="drop_after",
                         help="seconds after ROUND 1 starts before killing the client")
-    parser.add_argument("--dp", action="store_true", help="enable client clipping + DP noise")
+    parser.add_argument("--dp", action="store_true", help="enable client clipping + consensus noise")
     parser.add_argument("--timeout", type=float, default=420.0, help="global watchdog (seconds)")
     args = parser.parse_args(argv)
 
     if not (REPO_ROOT / "secret.key").exists():
         raise SystemExit("[smoke] missing secret.key; run tools/gen_key.py first")
     if not (REPO_ROOT / "data" / "processed" / "smoke" / "c1.npz").exists():
-        raise SystemExit("[smoke] missing smoke shards; run data/prepare.py first")
+        raise SystemExit("[smoke] missing smoke files; run data/prepare.py first")
 
     if args.rounds:
         rounds = args.rounds
@@ -110,10 +111,14 @@ def main(argv=None) -> None:
         "min_clients": 1,
         "start_timeout_s": 120,
         "round_timeout_s": args.round_timeout,
-        "training": {"local_epochs": 1, "batch_size": 64, "lr": 0.001, "optimizer": "adam"},
-        "dp": {"enabled": bool(args.dp), "clip_norm": 1.0, "noise_sigma": 1.0, "target_delta": 1e-5},
+        "training": {"local_epochs": 1, "kd_epochs": 2, "temperature": 2.0,
+                     "batch_size": 64, "lr": 0.001, "optimizer": "adam"},
+        "proxy": {"architecture": "cnn", "epochs": 2, "lr": 0.001},
+        "dp": {"enabled": bool(args.dp), "clip_norm": 10.0, "noise_sigma": 1.0, "target_delta": 1e-5},
         "encryption": {"enabled": True, "key_file": "secret.key"},
-        "paths": {"test_file": "data/processed/smoke/test.npz", "out_dir": str(out_dir)},
+        "paths": {"public_file": "data/processed/smoke/public.npz",
+                  "test_file": "data/processed/smoke/test.npz",
+                  "out_dir": str(out_dir)},
     }
     server_cfg_path = run_dir / "server_config.json"
     server_cfg_path.write_text(json.dumps(server_cfg, indent=2), encoding="utf-8")
@@ -121,13 +126,18 @@ def main(argv=None) -> None:
     for client_id in clients:
         cfg = {
             "server_host": "127.0.0.1", "server_port": args.port, "client_id": client_id,
+            "architecture": ARCHITECTURES.get(client_id, "cnn"),
             "shard_file": f"data/processed/smoke/{client_id}.npz",
+            "public_file": "data/processed/smoke/public.npz",
             "encryption": {"enabled": True, "key_file": "secret.key"},
             "connect_timeout_s": 5, "retry_delay_s": 3,
             "local_metrics": True, "training_override": None, "log_file": None,
         }
         if args.slow == client_id:
             cfg["debug_delay"] = {"round": 1, "sleep_s": args.round_timeout + 10}
+        if args.drop == client_id:
+            # hold round 1 open long enough to be killed with certainty
+            cfg["debug_delay"] = {"round": 1, "sleep_s": 60}
         (run_dir / f"client_{client_id}_config.json").write_text(json.dumps(cfg, indent=2), encoding="utf-8")
 
     server_log = out_dir / "server.log"
@@ -202,7 +212,14 @@ def main(argv=None) -> None:
         except (TypeError, ValueError):
             acc_ok = False
         if args.dp:
-            checks.append((f"final test accuracy observed: {final_acc} (DP mechanism check: no accuracy requirement)", True))
+            checks.append((f"final test accuracy observed: {final_acc} (noise-path check: no accuracy requirement)", True))
+            checks.append(("consensus noise applied", "privacy noise added" in server_log.read_text(encoding="utf-8", errors="replace")))
+            client_path = out_dir / "client_metrics.csv"
+            clipped = False
+            if client_path.exists():
+                with open(client_path, encoding="utf-8") as handle:
+                    clipped = any(r.get("clipped") == "True" for r in csv.DictReader(handle))
+            checks.append(("at least one update was clipped", clipped))
         else:
             checks.append((f"final test accuracy observed: {final_acc}", acc_ok))
 

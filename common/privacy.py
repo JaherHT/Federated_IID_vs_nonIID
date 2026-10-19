@@ -1,21 +1,19 @@
-"""(epsilon, delta) differential privacy helpers, DP-FedAvg style.
+"""(epsilon, delta) helpers for the optional privacy mode.
 
-Mechanism (following Andrew et al. 2021, "Differentially Private Federated
-Learning with Client-Level DP", simplified):
+Mechanism (client-level, adapted to the logits exchange):
 
-* every client clips its update delta to L2 norm <= clip_norm C
-* the server averages the clipped deltas and adds Gaussian noise
-  N(0, sigma^2 * s^2), where s = C * (largest client share of the round)
-  is the L2 sensitivity of the weighted mean with respect to one client
+* each client clips its public-set probability vector to L2 norm <= clip_norm
+  (C) before sending it
+* the server adds Gaussian noise N(0, sigma^2 * s^2) to the averaged
+  probabilities (the consensus), where s = C * (largest client share of the
+  round) is the L2 sensitivity of the weighted mean w.r.t. one client
 * accounting: the analytic Gaussian mechanism (Balle and Wang 2018) per
   round, composed over rounds with basic composition
 
 This is a valid but conservative bound (a moments/RDP accountant would give
-tighter numbers). Scope, stated honestly: protects the released per-round
-aggregate against inferences about a single client's participation/update.
-It does NOT hide individual updates from the server (the server computes the
-noisy mean and sees each clipped delta; no secure aggregation here), and it
-does not protect the raw local data beyond what the clipping bounds allow.
+tighter numbers). Scope, stated honestly: it protects the released per-round
+consensus (what every participant receives); it does not hide individual
+updates from the server (there is no secure aggregation).
 """
 from __future__ import annotations
 
@@ -24,39 +22,35 @@ import math
 import numpy as np
 
 
-def l2_norm(delta: dict) -> float:
-    """Global L2 norm of a delta dict (all tensors flattened)."""
-    squared = sum(float(np.sum(np.asarray(arr, dtype=np.float64) ** 2)) for arr in delta.values())
-    return math.sqrt(squared)
+def l2_norm_array(arr: np.ndarray) -> float:
+    """Global L2 norm of an array (flattened)."""
+    return float(np.sqrt(np.sum(np.asarray(arr, dtype=np.float64) ** 2)))
 
 
-def clip_delta(delta: dict, clip_norm: float) -> tuple:
-    """Scale a delta dict so its global L2 norm is at most `clip_norm`.
+def clip_array(arr: np.ndarray, clip_norm: float) -> tuple:
+    """Scale an array so its L2 norm is at most `clip_norm`.
 
-    Returns (delta_clipped, was_clipped, original_norm). The original dict is
+    Returns (clipped_array, was_clipped, original_norm). The original array is
     returned unchanged when it already fits.
     """
-    norm = l2_norm(delta)
+    arr = np.asarray(arr, dtype=np.float32)
+    norm = l2_norm_array(arr)
     if norm <= clip_norm or norm == 0.0:
-        return delta, False, norm
-    scale = clip_norm / norm
-    clipped = {k: (np.asarray(arr) * scale).astype(np.float32) for k, arr in delta.items()}
-    return clipped, True, norm
+        return arr, False, norm
+    return (arr * (clip_norm / norm)).astype(np.float32), True, norm
 
 
-def add_gaussian_noise(delta: dict, sigma: float, sensitivity: float, rng: np.random.Generator) -> dict:
-    """Add N(0, (sigma * sensitivity)^2) noise to every element of the delta."""
+def add_gaussian_noise_array(arr: np.ndarray, sigma: float, sensitivity: float,
+                             rng: np.random.Generator) -> np.ndarray:
+    """Add N(0, (sigma * sensitivity)^2) noise to every element."""
     std = sigma * sensitivity
-    out = {}
-    for k, arr in delta.items():
-        arr32 = np.asarray(arr, dtype=np.float32)
-        noise = rng.normal(0.0, std, size=arr32.shape).astype(np.float32)
-        out[k] = (arr32 + noise).astype(np.float32)
-    return out
+    arr32 = np.asarray(arr, dtype=np.float32)
+    noise = rng.normal(0.0, std, size=arr32.shape).astype(np.float32)
+    return (arr32 + noise).astype(np.float32)
 
 
 def mean_sensitivity(clip_norm: float, sample_counts: list) -> float:
-    """L2 sensitivity of the sample-weighted mean of clipped deltas w.r.t.
+    """L2 sensitivity of the sample-weighted mean of clipped vectors w.r.t.
     one client's replacement:  clip_norm * max(n_k) / sum(n_k)."""
     total = float(sum(sample_counts))
     if total <= 0:

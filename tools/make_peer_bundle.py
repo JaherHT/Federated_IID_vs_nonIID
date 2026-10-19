@@ -8,6 +8,7 @@ Each zip (bundles/peer_<id>.zip) contains:
 
     the code (common/, server/, client/, tools/, docs, requirements.txt)
     data/processed/<scenario>/<id>.npz   - that peer's shard(s), read-only
+    data/processed/public.npz            - the shared label-free public set
     client/config.json                   - pre-filled for that peer
     secret.key                           - the shared protocol key
     START_HERE.txt                       - exact setup and run commands
@@ -27,16 +28,19 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 INCLUDE_DIRS = ["common", "server", "client", "tools"]
 INCLUDE_FILES = ["README.md", "PROTOCOL.md", "TEAM.md", "requirements.txt", ".gitignore"]
 
+# One architecture per client on purpose: each machine runs a different model.
+ARCHITECTURES = {"c1": "cnn", "c2": "mlp", "c3": "cnn_deep"}
+
 START_HERE = """\
 START HERE - client '{client_id}'
 =================================
 
-You are client '{client_id}' of a 3-client federation (shared CNN,
-Fashion-MNIST). One client process, from this folder:
+You are client '{client_id}' of a 3-client federation (Fashion-MNIST,
+every client runs its own model). One client process, from this folder:
 
   1. python -m venv .venv
      .venv\\Scripts\\pip install -r requirements.txt
-     (CPU-only torch, smaller download: 
+     (CPU-only torch, smaller download:
       .venv\\Scripts\\pip install torch --index-url https://download.pytorch.org/whl/cpu)
 
   2. Self-check; expect RESULT: PASS:
@@ -44,9 +48,13 @@ Fashion-MNIST). One client process, from this folder:
      .venv\\Scripts\\python tools\\protocol_selftest.py --mode all
 
   3. Run: set "server_host" in client\\config.json (address from the group
-     chat), then:
+     chat; see TEAM.md for same-network vs different-network addresses), then:
      .venv\\Scripts\\python -m client.client --config client\\config.json
      Keep it running; it reconnects by itself after network drops.
+
+Your file:  client\\config.json  ->  "architecture": "{arch}"
+  Presets: cnn | mlp | cnn_deep (common\\model.py). Swap freely, or add your
+  own model function there; different machines may run different models.
 
 Your shards (read-only):
      data\\processed\\iid\\{client_id}.npz       (IID run)
@@ -92,12 +100,18 @@ def build_peer(peer: str, scenarios: list, out_dir: Path) -> Path:
             if not shard.exists():
                 raise SystemExit(f"missing shard {shard}; run data/prepare.py first")
             zf.write(shard, arcname=f"data/processed/{scenario}/{peer}.npz")
-        zf.writestr("START_HERE.txt", START_HERE.format(client_id=peer))
+        public = REPO_ROOT / "data" / "processed" / "public.npz"
+        if not public.exists():
+            raise SystemExit("missing data/processed/public.npz; run data/prepare.py first")
+        zf.write(public, arcname="data/processed/public.npz")
+        zf.writestr("START_HERE.txt", START_HERE.format(client_id=peer, arch=ARCHITECTURES.get(peer, "cnn")))
         config = {
             "server_host": "PUT-SERVER-IP-HERE",
             "server_port": 5000,
             "client_id": peer,
+            "architecture": ARCHITECTURES.get(peer, "cnn"),
             "shard_file": f"data/processed/{scenarios[0]}/{peer}.npz",
+            "public_file": "data/processed/public.npz",
             "encryption": {"enabled": True, "key_file": "secret.key"},
             "connect_timeout_s": 10,
             "retry_delay_s": 3,

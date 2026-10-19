@@ -1,8 +1,16 @@
 # TEAM: Federated Learning, IID vs non-IID (Fashion-MNIST)
 
-One server, three clients. Each client trains the shared CNN on its own shard
-and sends only weights; the server averages them (FedAvg). Two runs to compare
-(IID and non-IID), plus a live demo where a client loses its network mid-run.
+Goal: the group activity, working end to end on our four machines.
+  - a distributed federated system (one server, three clients, each on its own computer)
+  - an IID run and a non-IID run, measured the same way, compared and explained
+  - one session where a client loses its network mid-run: the rest keeps going,
+    and the client rejoins by itself when it is back
+
+How it works: every client trains its own model on its own shard, then sends
+only classification probabilities on a shared public set (2000 images, no
+labels). The server averages the probabilities into one consensus and sends it
+back; each client distills from it before the next round. Model weights never
+leave any machine, so every client may use a different architecture.
 
 Roles:
 - [name]: server machine + client c3.
@@ -10,16 +18,30 @@ Roles:
 - [name]: client c2.
 
 What each role does:
-- Server + c3: runs the federation from the server machine and posts the server
-  address to the group before a session. Client c3 runs on the same machine.
-- Client c1 / c2: runs one client process during sessions and keeps it alive;
-  owns its client code (the reference client as is, or a rewrite that matches
-  PROTOCOL.md and passes tools\protocol_selftest.py --mode server); reports its
-  per-round numbers.
+- Server + c3: runs the server for every session, posts the server address and
+  the round count in the group chat first, watches the server log, and runs
+  client c3 on the same machine.
+- Client c1 / c2: run one client process during sessions and keep it alive;
+  choose their own architecture (presets: cnn | mlp | cnn_deep, or add a model
+  in common/model.py; your machine, your model); report their per-round numbers.
 
-What you already have: this repo; your two shards (data\processed\iid\... and
-data\processed\noniid\..., 20,000 samples each); secret.key (private; required
-to connect); a pre-filled client\config.json.
+What you already have:
+- this repo (same code on every machine)
+- your two shards, 20,000 samples each: data\processed\iid\ and data\processed\noniid\
+- data\processed\public.npz (the shared public set)
+- secret.key (the protocol key; private, never share it outside the team)
+- a pre-filled client\config.json (server address, your shard, your architecture)
+
+Connecting (both ways work; decide per session where everyone is):
+- Same network (lab, one Wi-Fi): the server person runs tools\net_info.py and
+  posts the printed LAN address (usually 192.168.x.x).
+- Different networks (each of us at home): install Tailscale on all four
+  machines, sign in, join one shared network; the server person then runs
+  tools\net_info.py and posts the printed 100.x address. The system itself does
+  not change; only the address in server_host does.
+- Everyone else: put that address into "server_host" in client\config.json.
+  Port stays 5000. Campus Wi-Fi is sometimes blocked between devices (test it);
+  a phone hotspot is the fallback.
 
 Client steps (c1, c2):
 1. Setup (Windows, repo root):
@@ -29,11 +51,20 @@ Client steps (c1, c2):
 2. Self-check (expect RESULT: PASS):
    .venv\Scripts\python tools\bench.py
    .venv\Scripts\python tools\protocol_selftest.py --mode all
-3. Run: set "server_host" in client\config.json (address from the group chat), then:
+3. Join a session only after the self-check passes:
    .venv\Scripts\python -m client.client --config client\config.json
    Keep it running; it reconnects by itself after network drops.
-4. Optional: training_override in your config (batch size, local epochs,
-   learning rate). Official runs use the server defaults.
+4. Optional: training_override in your config (batch size, epochs, learning
+   rate). Official runs use the server defaults.
 
-Fixed team-wide: common/model.py (FedAvg needs identical models) and PROTOCOL.md
-(one server, one decoder). Everything else in your client is yours.
+Rules:
+- The connection carries only this activity: the server accepts a HELLO
+  handshake, then one UPDATE per round (your probabilities). Anything else is
+  refused and the connection is closed. No file access and no remote commands,
+  in either direction. Full spec: PROTOCOL.md.
+- Keep secret.key out of chats, screenshots and git.
+- Fixed team-wide: PROTOCOL.md, the data files, and the public set. Everything
+  else in your client is yours (architecture included).
+- Everyone must be able to explain: what is exchanged, how the averaging
+  works, what changes between IID and non-IID, and what happens when a client
+  drops out.

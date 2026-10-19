@@ -1,24 +1,23 @@
-"""Reference federated learning client.
+"""Federated learning client (reference implementation).
 
-This file is a *reference*: you can copy it, adapt it, or rewrite it. The
-contract is PROTOCOL.md, not this code. Two things must match the rest of the
-team: the model topology (common/model.py) and the message format.
+You define your own model here: pick one of the presets in common/model.py
+("cnn", "mlp", "cnn_deep") or add your own. The federation exchanges only
+probabilities on a shared public set, so your architecture is yours alone.
 
-What one round looks like, from the client side:
-  1. receive ROUND (current global weights + training config)
-  2. train locally for the given number of epochs on your own shard
-  3. delta = weights after training - weights before training
-  4. if the round config carries a clip_norm (requested by the server), clip the delta to that
-     L2 norm before sending
-  5. send UPDATE with the delta + your local metrics
+One round:
+  ROUND message arrives
+    -> train locally on your private shard (cross-entropy)
+    -> distill from the consensus probabilities on the public set
+       (skipped in round 1, when there is no consensus yet)
+    -> compute your model's probabilities on the public set
+    -> send UPDATE {round, client_id, n_train, probs, aux}
 
-On any network error: log, close, wait retry_delay_s, reconnect and continue.
-The server accepts reconnections at any time; you always receive the latest
-global weights at the start of the next round, so nothing has to be reconciled.
+The client loads model and data before connecting, and it retries by itself
+after network drops; restarting is never required.
 
 Run from the repo root:
 
-    python -m client.client --config client/config_c1.json
+    python -m client.client --config client/config.json
 """
 from __future__ import annotations
 
@@ -29,7 +28,9 @@ import sys
 import time
 from pathlib import Path
 
+import numpy as np
 import torch
+import torch.nn.functional as F
 
 if __package__ in (None, ""):  # allow `python client/client.py` as well
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -37,172 +38,271 @@ if __package__ in (None, ""):  # allow `python client/client.py` as well
 from common import data as data_mod
 from common import privacy
 from common import protocol
-from common.model import make_model
+from common.model import build_model, param_count
 
-LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(message)s"
 log = logging.getLogger("client")
 
 
-def snapshot(model) -> dict:
-    return {k: v.detach().cpu().numpy().astype("float32") for k, v in model.state_dict().items()}
-
-
-def train_local(model, shard_path: str, cfg: dict) -> float:
-    """Local training step: a few epochs of SGD/Adam on the local shard.
-
-    Returns the mean training loss of the last epoch.
-    """
-    batch_size = int(cfg.get("batch_size", 64))
-    epochs = int(cfg.get("local_epochs", 1))
-    lr = float(cfg.get("lr", 0.001))
-    optimizer_name = str(cfg.get("optimizer", "adam")).lower()
-
-    loader = data_mod.make_loader(shard_path, batch_size=batch_size, shuffle=True)
-    if optimizer_name == "sgd":
-        optimizer = torch.optim.SGD(model.parameters(), lr=lr)
-    else:
-        optimizer = torch.optim.Adam(model.parameters(), lr=lr)
-    criterion = torch.nn.CrossEntropyLoss()
-
-    model.train()
-    last_loss = 0.0
-    for _ in range(epochs):
-        epoch_loss = 0.0
-        batches = 0
-        for x, y in loader:
-            optimizer.zero_grad()
-            loss = criterion(model(x), y)
-            loss.backward()
-            optimizer.step()
-            epoch_loss += float(loss.detach())
-            batches += 1
-        last_loss = epoch_loss / max(batches, 1)
-    return last_loss
+def _f(value):
+    return None if value is None else float(value)
 
 
 class Client:
     def __init__(self, cfg: dict):
         self.cfg = cfg
-        self.client_id = str(cfg["client_id"])
         self.host = str(cfg["server_host"])
         self.port = int(cfg["server_port"])
-        self.shard = data_mod.Shard(cfg["shard_file"])
-        self.model = make_model()
-        self.retry_delay = float(cfg.get("retry_delay_s", 3))
-        self.connect_timeout = float(cfg.get("connect_timeout_s", 10))
-        self.local_metrics = bool(cfg.get("local_metrics", True))
-        self.override = cfg.get("training_override") or {}
+        self.client_id = str(cfg["client_id"])
+        self.arch = str(cfg.get("architecture", "cnn"))
+        self.shard_file = str(cfg.get("shard_file", f"data/processed/iid/{self.client_id}.npz"))
+        self.public_file = str(cfg.get("public_file", "data/processed/public.npz"))
+        self.connect_timeout_s = float(cfg.get("connect_timeout_s", 10))
+        self.retry_delay_s = float(cfg.get("retry_delay_s", 3))
+        self.debug_delay = cfg.get("debug_delay") or {}
+        self.training_override = cfg.get("training_override") or {}
+        log_file = cfg.get("log_file")
 
         enc = cfg.get("encryption", {})
         self.key = protocol.load_key(enc.get("key_file", "secret.key")) if enc.get("enabled", True) else None
 
-    def setup_logging(self) -> None:
-        fmt = logging.Formatter(LOG_FORMAT)
-        root = logging.getLogger()
-        root.setLevel(logging.INFO)
-        stream = logging.StreamHandler(sys.stdout)
-        stream.setFormatter(fmt)
-        handlers = [stream]
-        if self.cfg.get("log_file"):
-            file_handler = logging.FileHandler(self.cfg["log_file"], encoding="utf-8")
-            file_handler.setFormatter(fmt)
-            handlers.append(file_handler)
-        root.handlers[:] = handlers
+        # Load everything BEFORE connecting: the server only accepts clients
+        # whose model and data are ready.
+        shard = data_mod.Shard(self.shard_file)
+        self.n_train = len(shard)
+        self.shard_path = self.shard_file
+        self.public_X = data_mod.load_inputs(self.public_file)
+        self.model = build_model(self.arch)
 
-    # ------------------------------------------------------------------- run
-    def run(self) -> None:
-        self.setup_logging()
-        counts = self.shard.class_counts()
-        nonzero = " ".join(f"{c}:{n}" for c, n in counts.items() if n)
-        log.info("client %s ready | shard=%s | %d samples", self.client_id, self.shard.path, len(self.shard))
-        log.info("class counts: %s", nonzero)
-        while True:
-            try:
-                self.connected_loop()
-                return  # clean shutdown (FINISHED from the server)
-            except KeyboardInterrupt:
-                log.info("interrupted by user; exiting")
-                return
-            except Exception as exc:
-                log.warning("connection problem (%s: %s); retrying in %.0f s ...",
-                            type(exc).__name__, exc, self.retry_delay)
-                time.sleep(self.retry_delay)
+        logger_root = logging.getLogger()
+        logger_root.setLevel(logging.INFO)
+        handlers = [logging.StreamHandler(sys.stdout)]
+        if log_file:
+            handlers.append(logging.FileHandler(log_file, encoding="utf-8"))
+        fmt = logging.Formatter(f"%(asctime)s | %(levelname)-7s | [{self.client_id}] %(message)s")
+        for handler in handlers:
+            handler.setFormatter(fmt)
+        logger_root.handlers[:] = handlers
 
-    def connected_loop(self) -> None:
-        conn = protocol.connect(self.host, self.port, self.key, self.connect_timeout)
-        log.info("connected to %s:%d", self.host, self.port)
-        conn.send({"type": "HELLO", "proto": protocol.PROTO_VERSION,
-                   "client_id": self.client_id, "n_train": len(self.shard)})
-        welcome = conn.recv()
-        log.info("handshake ok (server announced %s total rounds)", welcome.get("total_rounds"))
-        while True:
-            message = conn.recv()
-            mtype = message.get("type")
-            if mtype == "FINISHED":
-                log.info("server finished the run; exiting")
-                conn.close()
-                return
-            if mtype != "ROUND":
-                log.warning("ignoring unknown message type %r", mtype)
-                continue
-            self.handle_round(conn, message)
+        log.info("config: server=%s:%d arch=%s | shard=%s (%d samples) | public=%s (%d samples) | %d params",
+                 self.host, self.port, self.arch, self.shard_file, self.n_train,
+                 self.public_file, int(self.public_X.shape[0]), param_count(self.model))
 
-    def handle_round(self, conn, message: dict) -> None:
+    # -------------------------------------------------------------- training
+    def _training_plan(self, round_cfg: dict) -> dict:
+        plan = {
+            "local_epochs": 1,
+            "kd_epochs": 2,
+            "temperature": 2.0,
+            "batch_size": 64,
+            "lr": 0.001,
+            "optimizer": "adam",
+        }
+        allowed = set(plan) | {"clip_norm"}
+        plan.update({k: v for k, v in (round_cfg or {}).items() if k in allowed})
+        plan.update({k: v for k, v in self.training_override.items() if k in allowed})
+        return plan
+
+    def _optimizer(self, plan: dict):
+        if str(plan.get("optimizer", "adam")) == "sgd":
+            return torch.optim.SGD(self.model.parameters(), lr=float(plan["lr"]))
+        return torch.optim.Adam(self.model.parameters(), lr=float(plan["lr"]))
+
+    def train_local(self, plan: dict) -> float:
+        self.model.train()
+        loader = data_mod.make_loader(self.shard_path, batch_size=int(plan["batch_size"]), shuffle=True)
+        criterion = torch.nn.CrossEntropyLoss()
+        optimizer = self._optimizer(plan)
+        last = 0.0
+        for _ in range(int(plan["local_epochs"])):
+            total, batches = 0.0, 0
+            for x, y in loader:
+                loss = criterion(self.model(x), y)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                total += float(loss.detach())
+                batches += 1
+            last = total / max(batches, 1)
+        return last
+
+    def distill(self, targets, plan: dict) -> float:
+        temperature = float(plan["temperature"])
+        target_tensor = torch.from_numpy(np.asarray(targets, dtype=np.float32))
+        self.model.train()
+        optimizer = self._optimizer(plan)
+        n = int(self.public_X.shape[0])
+        batch_size = int(plan["batch_size"])
+        last = 0.0
+        for _ in range(int(plan["kd_epochs"])):
+            perm = torch.randperm(n)
+            total, batches = 0.0, 0
+            for i in range(0, n, batch_size):
+                idx = perm[i:i + batch_size]
+                logits = self.model(self.public_X[idx])
+                logp = F.log_softmax(logits / temperature, dim=1)
+                loss = F.kl_div(logp, target_tensor[idx], reduction="batchmean") * (temperature * temperature)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+                total += float(loss.detach())
+                batches += 1
+            last = total / max(batches, 1)
+        return last
+
+    @torch.no_grad()
+    def public_probs(self, temperature: float) -> np.ndarray:
+        """Softmax probabilities of the current model over the public set."""
+        self.model.eval()
+        chunks = []
+        n = int(self.public_X.shape[0])
+        for i in range(0, n, 512):
+            logits = self.model(self.public_X[i:i + 512])
+            probs = torch.softmax(logits / temperature, dim=1)
+            chunks.append(probs.cpu().numpy().astype(np.float32))
+        self.model.train()
+        if not chunks:
+            return np.zeros((0, 10), dtype=np.float32)
+        return np.concatenate(chunks, axis=0)
+    # ----------------------------------------------------------------- round
+    def handle_round(self, message: dict, conn: protocol.Connection) -> None:
         r = int(message["round"])
-        cfg = dict(message.get("config", {}))
-        cfg.update(self.override)  # a peer's own tuning wins over server defaults
+        plan = self._training_plan(message.get("config"))
+        started = time.time()
 
-        self.model.load_state_dict({k: torch.from_numpy(v) for k, v in message["weights"].items()})
-        before = snapshot(self.model)
+        local_loss = None
+        if int(plan["local_epochs"]) > 0:
+            local_loss = self.train_local(plan)
 
-        t0 = time.time()
-        train_loss = train_local(self.model, self.shard.path, cfg)
-        after = snapshot(self.model)
-        delta = {k: (after[k] - before[k]).astype("float32") for k in before}
+        targets = message.get("targets")
+        distill_loss = None
+        if targets is not None and int(plan["kd_epochs"]) > 0:
+            distill_loss = self.distill(targets, plan)
 
-        delta_norm = privacy.l2_norm(delta)
+        probs = self.public_probs(float(plan["temperature"]))
+        # Clipping (when the round asks for it) applies to the deviation from
+        # the uniform distribution: the deviation bounds the update's norm,
+        # and adding the uniform layer back keeps every row a probability row
+        # (elements in [0, 1], sums to 1) as the protocol requires.
+        uniform = 1.0 / probs.shape[1]
+        deviation = (probs - uniform).astype(np.float32)
+        probs_norm = privacy.l2_norm_array(deviation)
         clipped = False
-        clip_norm = cfg.get("clip_norm")
+        clip_norm = plan.get("clip_norm")
         if clip_norm is not None:
-            delta, clipped, delta_norm = privacy.clip_delta(delta, float(clip_norm))
+            deviation, clipped, probs_norm = privacy.clip_array(deviation, float(clip_norm))
+            probs = (deviation + uniform).astype(np.float32)
 
-        local_acc = 0.0
-        if self.local_metrics:
-            _, local_acc = data_mod.evaluate(self.model, self.shard.path)
+        train_seconds = time.time() - started
+        if self.debug_delay.get("round") == r:
+            sleep_s = float(self.debug_delay.get("sleep_s", 0.0))
+            if sleep_s > 0:
+                log.warning("debug_delay active: holding the round-%d update for %.0f s", r, sleep_s)
+                time.sleep(sleep_s)
 
-        # debug hook used by tools/smoke_local.py to simulate a frozen network:
-        # hold this round's update for sleep_s seconds before sending it.
-        delay = self.cfg.get("debug_delay")
-        if isinstance(delay, dict) and int(delay.get("round", -1)) == r:
-            seconds = float(delay.get("sleep_s", 30.0))
-            log.info("debug hook: holding the round-%d update for %.0f s (simulated network freeze)", r, seconds)
-            time.sleep(seconds)
+        if not bool(np.isfinite(probs).all()):
+            log.error("round %d: model produced non-finite probabilities; skipping this update", r)
+            return
+
+        local_acc = None
+        if self.cfg.get("local_metrics", True):
+            _, local_acc = data_mod.evaluate(self.model, self.shard_path)
+
+        aux = {
+            "local_loss": _f(local_loss),
+            "local_acc": _f(local_acc),
+            "distill_loss": _f(distill_loss),
+            "probs_norm": _f(probs_norm),
+            "clipped": bool(clipped),
+            "train_seconds": _f(train_seconds),
+        }
+        aux = {k: v for k, v in aux.items() if v is not None}
 
         conn.send({
             "type": "UPDATE",
             "round": r,
             "client_id": self.client_id,
-            "n_train": len(self.shard),
-            "delta": delta,
-            "aux": {
-                "train_loss": float(train_loss),
-                "local_acc": float(local_acc),
-                "delta_norm": float(delta_norm),
-                "clipped": bool(clipped),
-                "train_seconds": float(time.time() - t0),
-            },
+            "n_train": int(self.n_train),
+            "probs": probs,
+            "aux": aux,
         })
-        log.info("round %d: train_loss=%.4f | local_acc=%.4f | |delta|=%.3f%s | %.1f s%s",
-                 r, train_loss, local_acc, delta_norm,
-                 " [clipped]" if clipped else "", time.time() - t0,
-                 " [held by debug hook]" if isinstance(delay, dict) and int(delay.get("round", -1)) == r else "")
+        log.info("round %d: update sent (local_loss=%s distill_loss=%s probs_norm=%.3f clipped=%s | %.1f s)",
+                 r, aux.get("local_loss"), aux.get("distill_loss"),
+                 aux.get("probs_norm", 0.0), clipped, train_seconds)
+
+    # ------------------------------------------------------------ connection
+    def connected_loop(self) -> None:
+        log.info("connecting to %s:%d ...", self.host, self.port)
+        conn = protocol.connect(self.host, self.port, self.key, self.connect_timeout_s)
+        try:
+            conn.send({
+                "type": "HELLO",
+                "proto": protocol.PROTO_VERSION,
+                "client_id": self.client_id,
+                "n_train": int(self.n_train),
+                "ready": True,
+                "arch": self.arch,
+            })
+            welcome = conn.recv()
+            if welcome.get("type") != "WELCOME":
+                raise protocol.ProtocolError(f"expected WELCOME, got {welcome.get('type')!r}")
+            expected_public = int(welcome.get("public_size", -1))
+            if expected_public >= 0 and expected_public != int(self.public_X.shape[0]):
+                raise SystemExit(
+                    f"public set mismatch: server expects {expected_public} samples, "
+                    f"your '{self.public_file}' has {int(self.public_X.shape[0])}; "
+                    "re-extract your bundle so all data files come from the same build")
+            log.info("connected: %s rounds planned, public set %d samples, %d classes",
+                     welcome.get("total_rounds"), expected_public, int(welcome.get("num_classes", 10)))
+            while True:
+                message = conn.recv()
+                mtype = message.get("type")
+                if mtype == "ROUND":
+                    self.handle_round(message, conn)
+                elif mtype == "FINISHED":
+                    log.info("run finished; exiting")
+                    return
+                else:
+                    log.warning("ignoring unexpected message type from server: %r", mtype)
+        finally:
+            conn.close()
+
+    def run(self) -> None:
+        while True:
+            try:
+                self.connected_loop()
+                return  # FINISHED received; clean exit
+            except KeyboardInterrupt:
+                log.info("interrupted; exiting")
+                return
+            except SystemExit:
+                raise
+            except Exception as exc:
+                log.warning("connection problem (%s: %s); reconnecting in %.0f s",
+                            type(exc).__name__, exc, self.retry_delay_s)
+                time.sleep(self.retry_delay_s)
 
 
 def main(argv=None) -> None:
-    parser = argparse.ArgumentParser(description="Federated learning client (reference implementation)")
-    parser.add_argument("--config", required=True, help="path to a client config json")
+    parser = argparse.ArgumentParser(description="Federated learning client")
+    parser.add_argument("--config", default="client/config.json")
+    parser.add_argument("--server-host", default=None, dest="server_host")
+    parser.add_argument("--server-port", type=int, default=None, dest="server_port")
+    parser.add_argument("--client-id", default=None, dest="client_id")
+    parser.add_argument("--shard", default=None)
+    parser.add_argument("--architecture", default=None)
     args = parser.parse_args(argv)
+
     cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    if args.server_host is not None:
+        cfg["server_host"] = args.server_host
+    if args.server_port is not None:
+        cfg["server_port"] = args.server_port
+    if args.client_id is not None:
+        cfg["client_id"] = args.client_id
+    if args.shard is not None:
+        cfg["shard_file"] = args.shard
+    if args.architecture is not None:
+        cfg["architecture"] = args.architecture
     Client(cfg).run()
 
 

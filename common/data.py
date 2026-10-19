@@ -11,11 +11,17 @@ STD = 0.3530
 DEFAULT_BATCH_SIZE = 64
 
 
-class Shard:
-    """One machine's dataset slice: .npz with uint8 arrays X (N, 28, 28) and y (N,).
+def normalize_images(X: np.ndarray) -> torch.Tensor:
+    """uint8 images (N, 28, 28) -> normalized float32 tensor (N, 1, 28, 28)."""
+    x = torch.from_numpy(np.asarray(X, dtype=np.float32)).unsqueeze(1)
+    return (x / 255.0 - MEAN) / STD
 
-    Same class reads a client shard or the global test file; the format is
-    identical on purpose.
+
+class Shard:
+    """A private training slice: .npz with uint8 arrays X (N, 28, 28) and y (N,).
+
+    The same class reads a labelled eval file; the format is identical on
+    purpose.
     """
 
     def __init__(self, path: str):
@@ -37,6 +43,13 @@ class Shard:
         return {int(c): int(n) for c, n in enumerate(counts)}
 
 
+def load_inputs(path: str) -> torch.Tensor:
+    """Load only the images (the public set): .npz with X (N, 28, 28)."""
+    with np.load(path) as payload:
+        X = payload["X"].copy()
+    return normalize_images(X)
+
+
 def make_loader(path: str, batch_size: int = DEFAULT_BATCH_SIZE, shuffle: bool = True):
     from torch.utils.data import DataLoader
 
@@ -45,7 +58,7 @@ def make_loader(path: str, batch_size: int = DEFAULT_BATCH_SIZE, shuffle: bool =
 
 @torch.no_grad()
 def evaluate(model, path: str, batch_size: int = 512) -> tuple:
-    """Mean cross-entropy loss and accuracy on a shard or the test file.
+    """Mean cross-entropy loss and accuracy on a labelled .npz file.
 
     Returns (loss, accuracy). Restores the model to train mode afterwards.
     """

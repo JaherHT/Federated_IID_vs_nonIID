@@ -4,17 +4,23 @@ Run once (or on every machine) before any federation run, from the repo root:
 
     python data/prepare.py
 
-Outputs in data/processed/ (all uint8 arrays, X (N,28,28) + y (N,)):
+Outputs in data/processed/ (all arrays uint8):
 
-    test.npz                   global test set, 10000 samples (stays on the server)
+    public.npz                 2000 label-free images; the public set every
+                               client computes probabilities on each round
+                               (drawn from the test pool first)
+    test.npz                   remaining 8000 test samples (X + y); the
+                               server's held-out evaluation set
     iid/c1.npz c2.npz c3.npz   IID split: one shuffle, three 20k shards
     noniid/c1.npz ...          non-IID split: sorted by label, three 20k shards
-    smoke/{c1,c2,c3,test}.npz  tiny shards for the local smoke test
+    smoke/{c1,c2,c3}.npz       tiny private shards for the local smoke test
+    smoke/public.npz           tiny public set (600)
+    smoke/test.npz             tiny eval set (400)
     distributions.json         class counts per client (the IID/non-IID evidence)
     manifest.json              seeds, source URL, checksums, dataset statistics
 
 The splits are deterministic (fixed seed), so every machine that runs this
-produces identical shards. Handing teammates their .npz files directly
+produces identical files. Handing teammates their .npz files directly
 (see tools/make_peer_bundle.py) is still the safest way to guarantee one
 common split for the whole team.
 """
@@ -39,8 +45,10 @@ FILES = {
 }
 SEED = 42
 CLIENT_IDS = ["c1", "c2", "c3"]
+PUBLIC_SIZE = 2000
 SMOKE_SIZE = 2500
-SMOKE_TEST_SIZE = 2000
+SMOKE_PUBLIC_SIZE = 600
+SMOKE_TEST_SIZE = 400
 
 
 def log(message: str) -> None:
@@ -95,6 +103,12 @@ def save_shard(path: Path, X: np.ndarray, y: np.ndarray, idx: np.ndarray | None 
         np.savez(path, X=X.astype(np.uint8), y=y.astype(np.uint8), idx=idx.astype(np.uint32))
 
 
+def save_inputs(path: Path, X: np.ndarray) -> None:
+    """Label-free images only (the public set)."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    np.savez(path, X=X.astype(np.uint8))
+
+
 def class_counts(y: np.ndarray) -> dict:
     counts = np.bincount(y.astype(np.int64), minlength=10)
     return {str(c): int(n) for c, n in enumerate(counts)}
@@ -142,7 +156,7 @@ def main(argv=None) -> None:
     distributions = {
         "iid": {},
         "noniid": {},
-        "test": {"counts": class_counts(y_test), "total": int(len(y_test))},
+        "test": {},
     }
 
     for scenario, chunks in (("iid", iid_chunks), ("noniid", noniid_chunks)):
@@ -153,17 +167,26 @@ def main(argv=None) -> None:
             distributions[scenario][client_id] = {"counts": class_counts(y), "total": int(len(y))}
             log(f"  {client_id}: {len(y)} samples | {preview(y)}")
 
-    save_shard(out_dir / "test.npz", X_test, y_test)
-    log(f"test.npz: {len(y_test)} samples")
+    # Public set (label-free) and held-out eval set, disjoint by construction.
+    perm_test = rng.permutation(len(y_test))
+    public_idx = perm_test[:PUBLIC_SIZE]
+    eval_idx = perm_test[PUBLIC_SIZE:]
+    save_inputs(out_dir / "public.npz", X_test[public_idx])
+    save_shard(out_dir / "test.npz", X_test[eval_idx], y_test[eval_idx])
+    distributions["public"] = {"total": int(len(public_idx)), "labels": "none (inputs only)"}
+    distributions["test"] = {"counts": class_counts(y_test[eval_idx]), "total": int(len(eval_idx))}
+    log(f"public.npz: {len(public_idx)} label-free images | test.npz: {len(eval_idx)} samples")
 
-    # smoke shards: small slices so the whole pipeline runs in ~1 minute
+    # smoke file set: small slices so the whole pipeline runs in ~1 minute
     smoke_dir = out_dir / "smoke"
     for client_id, idx in zip(CLIENT_IDS, iid_chunks):
         idx_small = idx[:SMOKE_SIZE]
         save_shard(smoke_dir / f"{client_id}.npz", X_train[idx_small], y_train[idx_small], idx_small)
-    test_choice = rng.choice(len(y_test), size=min(SMOKE_TEST_SIZE, len(y_test)), replace=False)
-    save_shard(smoke_dir / "test.npz", X_test[test_choice], y_test[test_choice])
-    log(f"smoke shards: {SMOKE_SIZE} train / {len(test_choice)} test per client")
+    smoke_public = public_idx[:SMOKE_PUBLIC_SIZE]
+    smoke_eval = eval_idx[:SMOKE_TEST_SIZE]
+    save_inputs(smoke_dir / "public.npz", X_test[smoke_public])
+    save_shard(smoke_dir / "test.npz", X_test[smoke_eval], y_test[smoke_eval])
+    log(f"smoke files: {SMOKE_SIZE} private / {len(smoke_public)} public / {len(smoke_eval)} eval")
 
     distributions_path = out_dir / "distributions.json"
     distributions_path.write_text(json.dumps(distributions, indent=2), encoding="utf-8")
@@ -173,9 +196,13 @@ def main(argv=None) -> None:
         "source": BASE_URL,
         "counts": {
             "train": int(len(y_train)),
-            "test": int(len(y_test)),
+            "test_pool": int(len(y_test)),
+            "public": int(len(public_idx)),
+            "test_eval": int(len(eval_idx)),
             "per_client": int(len(y_train) // len(CLIENT_IDS)),
             "smoke_per_client": SMOKE_SIZE,
+            "smoke_public": int(len(smoke_public)),
+            "smoke_eval": int(len(smoke_eval)),
         },
         "dataset_stats": {"mean": round(mean, 6), "std": round(std, 6)},
         "files": {},

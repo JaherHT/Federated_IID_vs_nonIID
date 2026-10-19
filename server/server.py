@@ -1,13 +1,23 @@
-"""Federated learning server: rounds, FedAvg aggregation, optional DP, logs.
+"""Federated learning server: logits-exchange rounds, logs, CSV metrics.
 
-One round:
-  1. broadcast the global weights + training config to all connected clients
-  2. collect UPDATE messages until every expected client answered or
-     round_timeout_s passes. A client that does not answer is logged and
-     skipped for that round; the server never waits forever on anyone.
-  3. aggregate: sample-weighted mean of the deltas (FedAvg); if DP is enabled,
-     add calibrated Gaussian noise and log the running epsilon budget
-  4. evaluate the new global model on the global test set, log the round
+The team's strategy is federated distillation over a public set instead of
+FedAvg: clients never send model weights, so every client can run its own
+architecture. Each round:
+
+  1. broadcast ROUND (current consensus probabilities on the public set + the
+     training config) to every connected client
+  2. collect UPDATE messages (each client's probabilities on the public set)
+     until every expected client answered or round_timeout_s passes. A client
+     that does not answer is logged and skipped; the server never waits
+     indefinitely on anyone.
+  3. aggregate: sample-weighted mean of the probabilities -> new consensus
+  4. train the server-side proxy model on the public set toward the consensus,
+     then evaluate it on the held-out test set and log the round
+
+The connection is strict: the server accepts a HELLO handshake once, then
+UPDATE messages for the open round. Anything else closes the connection.
+Payloads are plain data (JSON + float32 arrays); nothing received over the
+network is ever executed, imported, or written to disk.
 
 Run from the repo root:
 
@@ -37,10 +47,13 @@ if __package__ in (None, ""):  # allow `python server/server.py` as well
 from common import data as data_mod
 from common import privacy
 from common import protocol
-from common.model import make_model, param_count
+from common.model import build_model, param_count
 
 LOG_FORMAT = "%(asctime)s | %(levelname)-7s | %(message)s"
 log = logging.getLogger("server")
+
+ALLOWED_AUX_KEYS = {"local_loss", "local_acc", "distill_loss", "probs_norm",
+                    "clipped", "train_seconds"}
 
 
 def _fmt(value, digits: int = 4):
@@ -52,6 +65,7 @@ class ClientState:
     client_id: str
     conn: protocol.Connection
     n_train: int
+    arch: str
     connected_at: float
     dead: bool = False
     misses: int = 0
@@ -86,23 +100,28 @@ class Server:
         self.expected_ids = [str(c) for c in config.get("expected_client_ids", [])]
         self.min_clients = int(config.get("min_clients", 1))
         self.start_timeout_s = float(config.get("start_timeout_s", 300))
-        self.round_timeout_s = float(config.get("round_timeout_s", 30))
+        self.round_timeout_s = float(config.get("round_timeout_s", 90))
         self.training_cfg = dict(config.get("training", {}))
+        proxy_cfg = config.get("proxy", {})
+        self.proxy_epochs = int(proxy_cfg.get("epochs", 2))
+        self.proxy_lr = float(proxy_cfg.get("lr", 0.001))
 
         paths = config.get("paths", {})
+        self.public_file = str(paths.get("public_file", "data/processed/public.npz"))
         self.test_file = str(paths.get("test_file", "data/processed/test.npz"))
         out_dir = paths.get("out_dir")
         self.out_dir = Path(out_dir) if out_dir else (
             Path(paths.get("out_root", "runs")) / datetime.now().strftime("%Y%m%d_%H%M%S")
         )
 
-        initial = make_model()
-        self.param_names = list(initial.state_dict().keys())
-        self.global_weights = {
-            k: v.detach().cpu().numpy().astype(np.float32) for k, v in initial.state_dict().items()
-        }
-        self.model = make_model()
-        self._load_global_into_model()
+        with np.load(self.public_file) as payload:
+            self.public_X_t = data_mod.normalize_images(payload["X"].copy())
+        self.n_public = int(self.public_X_t.shape[0])
+        self.num_classes = 10
+
+        self.model = build_model(str(proxy_cfg.get("architecture", "cnn")))
+        self.proxy_params = param_count(self.model)
+        self.consensus = None  # np.ndarray (n_public, 10) float32 after round 1
 
         dp = config.get("dp", {})
         self.dp_sigma = float(dp.get("noise_sigma", 0.0))
@@ -123,7 +142,7 @@ class Server:
         self.metrics_rows: list = []
         self.metrics_columns = [
             "round", "wall_s", "clients_alive", "updates_ok",
-            "test_loss", "test_acc", "agg_norm", "dp_sigma", "epsilon_spent",
+            "test_loss", "test_acc", "consensus_norm", "dp_sigma", "epsilon_spent",
         ]
 
     # ------------------------------------------------------------------ setup
@@ -137,9 +156,6 @@ class Server:
         file_handler = logging.FileHandler(self.out_dir / "server.log", encoding="utf-8")
         file_handler.setFormatter(fmt)
         root.handlers[:] = [stream, file_handler]
-
-    def _load_global_into_model(self) -> None:
-        self.model.load_state_dict({k: torch.from_numpy(v) for k, v in self.global_weights.items()})
 
     def evaluate(self) -> tuple:
         return data_mod.evaluate(self.model, self.test_file)
@@ -158,6 +174,26 @@ class Server:
         else:
             log.info("stale connection of client %s closed (%s)", state.client_id, reason)
 
+    def _hello_problem(self, hello: dict) -> str:
+        if hello.get("type") != "HELLO":
+            return f"expected HELLO first, got {hello.get('type')!r}"
+        if int(hello.get("proto", -1)) != protocol.PROTO_VERSION:
+            return f"protocol version mismatch (client sent {hello.get('proto')!r})"
+        cid = hello.get("client_id")
+        if not isinstance(cid, str) or not (0 < len(cid) <= 64):
+            return f"bad client_id {cid!r}"
+        if self.expected_ids and cid not in self.expected_ids:
+            return f"unknown client_id {cid!r} (expected {self.expected_ids})"
+        if hello.get("ready") is not True:
+            return "client not ready (model/data must be loaded before joining)"
+        n_train = hello.get("n_train")
+        if not isinstance(n_train, int) or not (0 < n_train <= 10_000_000):
+            return f"bad n_train {n_train!r}"
+        arch = hello.get("arch")
+        if not isinstance(arch, str) or not (0 < len(arch) <= 64):
+            return f"bad arch descriptor {arch!r}"
+        return ""
+
     def accept_one(self, listener: socket.socket) -> bool:
         try:
             sock, addr = listener.accept()
@@ -171,13 +207,14 @@ class Server:
             log.warning("dropping connection from %s: bad handshake (%s)", addr[0], exc)
             conn.close()
             return False
-        if hello.get("type") != "HELLO" or not hello.get("client_id"):
-            log.warning("dropping connection from %s: expected HELLO, got %r", addr[0], hello.get("type"))
+        problem = self._hello_problem(hello)
+        if problem:
+            log.warning("refused connection from %s: %s", addr[0], problem)
             conn.close()
             return False
         cid = str(hello["client_id"])
         sock.settimeout(None)
-        state = ClientState(cid, conn, int(hello.get("n_train", 0)), time.time())
+        state = ClientState(cid, conn, int(hello["n_train"]), str(hello["arch"]), time.time())
         old = self.clients.get(cid)
         if old is not None:
             was = "was marked offline" if old.dead else "replacing previous connection"
@@ -186,10 +223,11 @@ class Server:
             old.conn.close()
         self.clients[cid] = state
         ClientReader(state, self.events).start()
-        log.info("client %s connected from %s (n_train=%d)", cid, addr[0], state.n_train)
+        log.info("client %s connected from %s (n_train=%d, arch=%s)", cid, addr[0], state.n_train, state.arch)
         try:
             state.conn.send({"type": "WELCOME", "proto": protocol.PROTO_VERSION,
-                             "total_rounds": self.rounds})
+                             "total_rounds": self.rounds, "public_size": self.n_public,
+                             "num_classes": self.num_classes})
         except Exception as exc:
             self.mark_dead(state, f"welcome send failed: {exc}")
             return False
@@ -234,12 +272,12 @@ class Server:
         self._client_file = open(self.out_dir / "client_metrics.csv", "w", newline="", encoding="utf-8")
         self._client_writer = csv.writer(self._client_file)
         self._client_writer.writerow(
-            ["round", "client_id", "status", "n_train", "train_loss", "local_acc",
-             "delta_norm", "clipped", "train_seconds"]
+            ["round", "client_id", "status", "n_train", "local_loss", "local_acc",
+             "distill_loss", "probs_norm", "clipped", "train_seconds"]
         )
-
+    # --------------------------------------------------------------- records
     def record_round(self, r: int, wall_s: float, clients_alive: int, updates_ok: int,
-                     loss: float, acc: float, agg_norm) -> None:
+                     loss: float, acc: float, consensus_norm) -> None:
         eps_spent = round(self.eps_round * r, 3) if (self.dp_enabled and self.eps_round) else ""
         row = {
             "round": r,
@@ -248,7 +286,7 @@ class Server:
             "updates_ok": updates_ok,
             "test_loss": round(float(loss), 6),
             "test_acc": round(float(acc), 6),
-            "agg_norm": "" if agg_norm is None else round(float(agg_norm), 4),
+            "consensus_norm": "" if consensus_norm is None else round(float(consensus_norm), 4),
             "dp_sigma": self.dp_sigma if self.dp_enabled else "",
             "epsilon_spent": eps_spent,
         }
@@ -261,9 +299,9 @@ class Server:
         n_train = int((message or {}).get("n_train", state.n_train))
         self._client_writer.writerow([
             r, state.client_id, status, n_train,
-            _fmt(aux.get("train_loss")), _fmt(aux.get("local_acc")),
-            _fmt(aux.get("delta_norm")), aux.get("clipped", ""),
-            _fmt(aux.get("train_seconds"), 2),
+            _fmt(aux.get("local_loss")), _fmt(aux.get("local_acc")),
+            _fmt(aux.get("distill_loss")), _fmt(aux.get("probs_norm")),
+            aux.get("clipped", ""), _fmt(aux.get("train_seconds"), 2),
         ])
         self._client_file.flush()
 
@@ -271,8 +309,9 @@ class Server:
         meta = {
             "started_at": datetime.now().isoformat(timespec="seconds"),
             "config": self.cfg,
-            "model_params": param_count(make_model()),
-            "param_names": self.param_names,
+            "strategy": "logits exchange (federated distillation over a public set)",
+            "proxy_params": self.proxy_params,
+            "public_samples": self.n_public,
         }
         (self.out_dir / "run_config.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
@@ -287,30 +326,69 @@ class Server:
                 "final_test_loss": final.get("test_loss"),
                 "final_test_acc": final.get("test_acc"),
                 "best_test_acc": best,
-                "clients_seen": sorted(self.clients.keys()),
+                "clients_seen": {cid: s.arch for cid, s in sorted(self.clients.items())},
                 "misses_per_client": {s.client_id: s.misses for s in self.clients.values()},
-                "dp": (
-                    {
-                        "enabled": True,
-                        "clip_norm": self.dp_clip_norm,
-                        "noise_sigma": self.dp_sigma,
-                        "target_delta": self.dp_target_delta,
-                        "epsilon_total": round((self.eps_round or 0) * self.rounds, 3),
-                        "note": "basic composition over planned rounds; conservative bound",
-                    }
-                    if self.dp_enabled else {"enabled": False}
-                ),
             }
+            if self.dp_enabled:
+                summary["privacy"] = {
+                    "clip_norm": self.dp_clip_norm,
+                    "noise_sigma": self.dp_sigma,
+                    "target_delta": self.dp_target_delta,
+                    "epsilon_total": round((self.eps_round or 0) * self.rounds, 3),
+                    "note": "basic composition over planned rounds; conservative bound",
+                }
             (self.out_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
         except Exception as exc:  # never let bookkeeping kill the process
             log.warning("could not write summary: %s", exc)
 
     # ---------------------------------------------------------------- rounds
     def round_config(self) -> dict:
-        cfg = dict(self.training_cfg)
+        cfg = {
+            "local_epochs": int(self.training_cfg.get("local_epochs", 1)),
+            "kd_epochs": int(self.training_cfg.get("kd_epochs", 2)),
+            "temperature": float(self.training_cfg.get("temperature", 2.0)),
+            "batch_size": int(self.training_cfg.get("batch_size", 64)),
+            "lr": float(self.training_cfg.get("lr", 0.001)),
+            "optimizer": str(self.training_cfg.get("optimizer", "adam")),
+        }
         if self.dp_enabled:
             cfg["clip_norm"] = self.dp_clip_norm
         return cfg
+
+    @staticmethod
+    def _renormalize(probs: np.ndarray) -> np.ndarray:
+        probs = np.clip(np.asarray(probs, dtype=np.float32), 0.0, None)
+        sums = probs.sum(axis=1, keepdims=True)
+        bad = sums[:, 0] <= 0
+        if bool(bad.any()):
+            probs[bad] = 1.0 / probs.shape[1]
+            sums = probs.sum(axis=1, keepdims=True)
+        return (probs / sums).astype(np.float32)
+
+    def _train_proxy(self) -> None:
+        """Train the server-side proxy model on the public set toward the consensus."""
+        if self.consensus is None:
+            return
+        cfg = self.round_config()
+        temperature = float(cfg["temperature"])
+        batch_size = int(cfg["batch_size"])
+        targets = torch.from_numpy(self.consensus)
+        optimizer = torch.optim.Adam(self.model.parameters(), lr=self.proxy_lr)
+        n = self.n_public
+        self.model.train()
+        started = time.time()
+        for _ in range(self.proxy_epochs):
+            perm = torch.randperm(n)
+            for i in range(0, n, batch_size):
+                idx = perm[i:i + batch_size]
+                logits = self.model(self.public_X_t[idx])
+                logp = torch.log_softmax(logits / temperature, dim=1)
+                loss = torch.nn.functional.kl_div(logp, targets[idx], reduction="batchmean") * (temperature * temperature)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+        log.info("proxy model trained on %d public samples x %d epoch(s) in %.1f s",
+                 n, self.proxy_epochs, time.time() - started)
 
     def run_round(self, r: int, listener: socket.socket) -> None:
         last_warn = 0.0
@@ -322,7 +400,7 @@ class Server:
             self.accept_one(listener)
         log.info("=== ROUND %d/%d ===", r, self.rounds)
         started = time.time()
-        message = {"type": "ROUND", "round": r, "weights": self.global_weights, "config": self.round_config()}
+        message = {"type": "ROUND", "round": r, "targets": self.consensus, "config": self.round_config()}
         expected = []
         for state in self.alive():
             try:
@@ -336,25 +414,56 @@ class Server:
             self.record_round(r, time.time() - started, len(self.alive()), 0, loss, acc, None)
             return
         updates = self.collect_updates(r, expected, listener)
-        agg, agg_norm = self.aggregate(updates)
-        if agg is None:
-            log.warning("round %d: no valid updates; global model unchanged", r)
+        consensus_new, cons_norm = self.aggregate(updates)
+        if consensus_new is None:
+            log.warning("round %d: no valid updates; consensus unchanged", r)
             loss, acc = self.evaluate()
             self.record_round(r, time.time() - started, len(self.alive()), 0, loss, acc, None)
             return
         if self.dp_enabled:
             counts = [int(m.get("n_train", 0)) for _, m in updates if int(m.get("n_train", 0)) > 0]
             sens = privacy.mean_sensitivity(self.dp_clip_norm, counts)
-            agg = privacy.add_gaussian_noise(agg, self.dp_sigma, sens, self.dp_rng)
-            log.info("DP noise added: sigma=%.2f sensitivity=%.4f", self.dp_sigma, sens)
-        for k in self.global_weights:
-            self.global_weights[k] = (self.global_weights[k] + agg[k]).astype(np.float32)
-        self._load_global_into_model()
+            consensus_new = privacy.add_gaussian_noise_array(consensus_new, self.dp_sigma, sens, self.dp_rng)
+            log.info("privacy noise added: sigma=%.2f sensitivity=%.4f", self.dp_sigma, sens)
+        self.consensus = self._renormalize(consensus_new)
+        self._train_proxy()
         loss, acc = self.evaluate()
         elapsed = time.time() - started
-        self.record_round(r, elapsed, len(self.alive()), len(updates), loss, acc, agg_norm)
+        self.record_round(r, elapsed, len(self.alive()), len(updates), loss, acc, cons_norm)
         log.info("round %d done in %.1f s | %d update(s) | test_loss=%.4f test_acc=%.4f",
                  r, elapsed, len(updates), loss, acc)
+
+    def _update_problem(self, message: dict, r: int, state: ClientState) -> str:
+        """Reason string if this message must drop the connection, '' if fine.
+
+        Late updates (for older rounds) never reach this method; the collect
+        loop ignores them before calling here.
+        """
+        if message.get("type") != "UPDATE":
+            return f"expected UPDATE, got {message.get('type')!r}"
+        if not isinstance(message.get("round"), int) or message.get("round") != r:
+            return f"invalid round field {message.get('round')!r}"
+        if message.get("client_id") != state.client_id:
+            return "client_id does not match the handshake"
+        n_train = message.get("n_train")
+        if not isinstance(n_train, int) or not (0 < n_train <= 10_000_000):
+            return f"bad n_train {n_train!r}"
+        probs = message.get("probs")
+        if not isinstance(probs, np.ndarray):
+            return "missing probability array"
+        if probs.dtype != np.float32:
+            return f"probabilities must be float32 (got {probs.dtype})"
+        if probs.ndim != 2 or probs.shape[1] != self.num_classes or probs.shape[0] != self.n_public:
+            return (f"probability shape mismatch (got {tuple(probs.shape)}, "
+                    f"expected ({self.n_public}, {self.num_classes}))")
+        if not bool(np.isfinite(probs).all()):
+            return "non-finite values"
+        if bool((probs < -1e-6).any()) or bool((probs > 1.0 + 1e-6).any()):
+            return "values outside [0, 1]"
+        sums = probs.sum(axis=1)
+        if bool((sums < 0.9).any()) or bool((sums > 1.1).any()):
+            return "rows do not sum to ~1"
+        return ""
 
     def collect_updates(self, r: int, expected: list, listener: socket.socket) -> list:
         pending = {s: True for s in expected}
@@ -379,18 +488,19 @@ class Server:
                 continue
             message = payload
             if state not in pending:
-                continue  # late update from a previous round, or duplicate: ignored
-            if message.get("type") != "UPDATE" or int(message.get("round", -1)) != r:
-                log.warning("client %s sent %r for round %s while round %d is open; ignored",
-                            state.client_id, message.get("type"), message.get("round"), r)
+                continue  # duplicate, or from a round that is already closed: ignored
+            round_field = message.get("round")
+            if message.get("type") == "UPDATE" and isinstance(round_field, int) and round_field != r:
+                log.warning("client %s sent a late update for round %s (round %d is open); ignoring it",
+                            state.client_id, round_field, r)
                 continue
-            delta = message.get("delta")
-            if (not isinstance(delta, dict)
-                    or set(delta.keys()) != set(self.global_weights)
-                    or any(np.asarray(delta[k]).shape != self.global_weights[k].shape for k in delta)):
-                log.error("client %s sent a malformed delta; update dropped", state.client_id)
+            problem = self._update_problem(message, r, state)
+            if problem:
+                log.error("client %s sent a message that breaks the protocol (%s); connection dropped",
+                          state.client_id, problem)
                 del pending[state]
-                self.write_client_row(r, state, "bad-delta")
+                self.write_client_row(r, state, "bad-update")
+                self.mark_dead(state, f"protocol violation: {problem}")
                 continue
             del pending[state]
             updates.append((state, message))
@@ -407,16 +517,18 @@ class Server:
         if not usable:
             return None, 0.0
         total_n = sum(int(m["n_train"]) for _, m in usable)
-        agg = {k: np.zeros_like(v) for k, v in self.global_weights.items()}
+        agg = np.zeros_like(np.asarray(usable[0][1]["probs"]), dtype=np.float32)
         for _, m in usable:
             weight = int(m["n_train"]) / total_n
-            for k, arr in m["delta"].items():
-                agg[k] = (agg[k] + (weight * np.asarray(arr, dtype=np.float32))).astype(np.float32)
-        return agg, privacy.l2_norm(agg)
+            agg = (agg + (weight * np.asarray(m["probs"], dtype=np.float32))).astype(np.float32)
+        return agg, privacy.l2_norm_array(agg)
 
     def finish(self) -> None:
         torch.save(self.model.state_dict(), self.out_dir / "model_final.pt")
-        log.info("saved final model: %s", self.out_dir / "model_final.pt")
+        log.info("saved final proxy model: %s", self.out_dir / "model_final.pt")
+        if self.consensus is not None:
+            np.save(self.out_dir / "consensus_final.npy", self.consensus)
+            log.info("saved final consensus: %s", self.out_dir / "consensus_final.npy")
         for state in self.alive():
             try:
                 state.conn.send({"type": "FINISHED"})
@@ -428,15 +540,14 @@ class Server:
     def run(self) -> None:
         self.setup_logging()
         log.info("=" * 70)
-        log.info("FedAvg server starting | rounds=%d | expected=%s | round_timeout=%.0f s",
+        log.info("federated server starting | strategy=logits exchange | rounds=%d | expected=%s | round_timeout=%.0f s",
                  self.rounds, self.expected_ids or f"{self.expected_clients} client(s)", self.round_timeout_s)
         log.info("training config: %s", json.dumps(self.round_config()))
         if self.dp_enabled:
             eps_total = privacy.total_epsilon(self.dp_sigma, self.rounds, self.dp_target_delta)
-            log.info("DP: clip_norm=%.2f sigma=%.2f target_delta=%.1e -> epsilon ~= %.2f over %d rounds (basic composition)",
+            log.info("privacy: clip_norm=%.2f sigma=%.2f target_delta=%.1e -> epsilon ~= %.2f over %d rounds (basic composition)",
                      self.dp_clip_norm, self.dp_sigma, self.dp_target_delta, eps_total, self.rounds)
-        else:
-            log.info("DP: disabled (plain FedAvg)")
+        log.info("public set: %d samples (%s) | test set: %s", self.n_public, self.public_file, self.test_file)
         log.info("output dir: %s", self.out_dir)
 
         listener = protocol.make_listener(self.host, self.port)
@@ -448,13 +559,12 @@ class Server:
             self.init_csvs()
             loss, acc = self.evaluate()
             self.record_round(0, 0.0, len(self.alive()), 0, loss, acc, None)
-            log.info("round 0 (initial random model): test_loss=%.4f test_acc=%.4f", loss, acc)
+            log.info("round 0 (untrained proxy model): test_loss=%.4f test_acc=%.4f", loss, acc)
             for r in range(1, self.rounds + 1):
                 self.run_round(r, listener)
             self.finish()
             final = self.metrics_rows[-1]
-            log.info("RUN FINISHED | final test_acc=%.4f over %s round(s)",
-                     final["test_acc"], final["round"])
+            log.info("RUN FINISHED | final test_acc=%.4f over %s round(s)", final["test_acc"], final["round"])
             if self.dp_enabled:
                 log.info("privacy spent: epsilon ~= %.2f at delta=%.1e over %d rounds (basic composition)",
                          (self.eps_round or 0) * self.rounds, self.dp_target_delta, self.rounds)
@@ -472,12 +582,12 @@ class Server:
 
 
 def main(argv=None) -> None:
-    parser = argparse.ArgumentParser(description="Federated learning server")
+    parser = argparse.ArgumentParser(description="Federated learning server (logits exchange)")
     parser.add_argument("--config", default="server/config.json")
     parser.add_argument("--port", type=int, default=None)
     parser.add_argument("--rounds", type=int, default=None)
     parser.add_argument("--round-timeout", type=float, default=None, dest="round_timeout")
-    parser.add_argument("--dp", action="store_true", help="force DP on (clip + Gaussian noise)")
+    parser.add_argument("--dp", action="store_true", help="enable client clipping + consensus noise")
     parser.add_argument("--sigma", type=float, default=None)
     parser.add_argument("--clip", type=float, default=None)
     args = parser.parse_args(argv)
