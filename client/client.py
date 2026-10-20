@@ -420,7 +420,7 @@ def main(argv=None) -> None:
     parser.add_argument("--architecture", default=None)
     args = parser.parse_args(argv)
 
-    cfg = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    cfg = json.loads(Path(args.config).read_text(encoding="utf-8-sig"))
     if args.server_host is not None:
         cfg["server_host"] = args.server_host
     if args.server_port is not None:

@@ -691,7 +691,7 @@ def main(argv=None) -> None:
     parser.add_argument("--clip", type=float, default=None)
     args = parser.parse_args(argv)
 
-    config = json.loads(Path(args.config).read_text(encoding="utf-8"))
+    config = json.loads(Path(args.config).read_text(encoding="utf-8-sig"))
     if args.port is not None:
         config.setdefault("network", {})["port"] = args.port
     if args.rounds is not None:

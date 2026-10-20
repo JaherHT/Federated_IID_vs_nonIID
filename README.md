@@ -203,6 +203,7 @@ weights it received; `consensus_final.npy` in probabilities mode),
 - **`refused connection ... expected HELLO first`:** normal for probes and port tests.
 - **`unknown client_id`:** your `client_id` is not in `expected_client_ids` (`c1..c4`).
 - **`client not ready` or a public-size mismatch:** stale bundle or edited data; unzip the current bundle fresh.
+- **`Unexpected UTF-8 BOM` on startup:** your editor saved the JSON with a BOM. The current client/server read configs BOM-safely (`utf-8-sig`); update the bundle, or re-save the file as UTF-8 without BOM.
 - **Architecture mismatch in FedAvg:** the client refuses with a clear message; main runs use `cnn` everywhere.
 - **`no connected clients; waiting for someone to come back`:** normal after a full drop; the server keeps listening.
 - **Slow rounds:** `tools/bench.py` gives your per-round time; typical full-size rounds take 15-30 s.
