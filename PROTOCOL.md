@@ -5,6 +5,16 @@ The reference implementation lives in `common/protocol.py`; this document is
 the contract. A client may be re-implemented, but it must match this spec
 byte for byte.
 
+**Timing:** the server opens a start window (`start_timeout_s`; 30 s in the
+shipped config) for the expected ids, then starts with whatever is connected
+(at least `min_clients`); with nobody connected it re-checks every 30 s. Each
+round stays open for at most `round_timeout_s` (90 s): missing or late updates
+are logged and skipped, and the round still completes. A client may connect at
+any time - it is welcomed immediately, joins the next round, and is identified
+by `client_id`, never by address. After the last round the server sends one
+FINISHED message carrying the final `weights` (FedAvg) or `targets`
+(probabilities) and `final_test_acc`.
+
 Two exchange modes share this protocol. The **FedAvg mode** is the main one
 (classic weight-delta exchange; one shared model on every machine). The
 **probabilities mode** is the secondary one (federated distillation,

@@ -34,7 +34,7 @@ machines, over the local network or over the internet:
 
 **Layout:**
 ```
-common/       shared code, identical everywhere (model presets, data, protocol, privacy helpers)
+common/       shared code, identical everywhere (model presets, data, protocol helpers)
 server/       the federated server (round loop, aggregation, server-side model, evaluation)
 client/       the reference client (adapt or rewrite it; see TEAM.md)
 data/         prepare.py + raw/ + processed/ (shards, public set, eval set, distributions.json)
@@ -83,7 +83,7 @@ On Linux/macOS use `.venv/bin/pip` etc.
   junk, unknown ids and not-ready clients are refused.
 - **make_peer_bundle.py:** builds one zip per peer. Server owner only.
 - **smoke_local.py:** full local dry run (one server + two clients).
-  `--strategy logits`, `--drop c2`, `--slow c2`, `--dp`, `--rounds N`.
+  `--strategy logits`, `--drop c2`, `--slow c2`, `--rounds N`.
 - **net_info.py:** prints the addresses to share (LAN `192.168.x.x` and
   Tailscale `100.x`).
 
@@ -122,6 +122,42 @@ update norm, participation), `summary.json`, `model_final.pt`, and
 - **Never exchanged:** raw data, labels, another client's update.
 
 Full details in `PROTOCOL.md`.
+
+**Timers and limits:**
+- **Start window (`start_timeout_s`):** the server waits this long for the full expected set (`expected_client_ids`). On expiry it starts with the clients that are connected, provided there are at least `min_clients` (1); with nobody connected it re-checks every 30 s. A progress line appears every 15 s with the seconds left.
+- **Round window (`round_timeout_s`):** each round stays open until every expected client answers or the window closes. Missing or late updates are logged and skipped; the round completes with the rest. A progress line appears every 5 s.
+- **Client connect (`connect_timeout_s`):** per-attempt timeout; on failure the client waits `retry_delay_s` and retries forever.
+- **Nobody connected:** between rounds the server idles (`no connected clients; waiting for someone to come back`), keeps the port open and accepts reconnections at any time.
+- **Mid-round join:** a client that connects during a round is welcomed immediately and joins at the next round; the current round is neither extended nor restarted.
+- **End of run:** `FINISHED` carries the final weights (FedAvg) or consensus (probabilities) plus `final_test_acc`; each client writes `client_out/` and exits.
+
+**Configuration reference** (`server/config.json`):
+| Key | Shipped value | Meaning |
+|---|---|---|
+| `network.host` / `network.port` | `0.0.0.0` / `5000` | listen address and port |
+| `strategy` | `fedavg` | `fedavg` (main) or `logits` (secondary) |
+| `rounds` | `15` | federated rounds |
+| `expected_clients` / `expected_client_ids` | `4` / `c1..c4` | who the server waits for; other ids are refused |
+| `min_clients` | `1` | below this the run does not start |
+| `start_timeout_s` | `30` | start window (code default 300) |
+| `round_timeout_s` | `90` | round window |
+| `training.*` | `local_epochs 1`, `batch 64`, `lr 1e-3`, `adam` | sent to clients in every ROUND |
+| `model.architecture` | `cnn` | shared model for FedAvg; also the server's own model |
+| `paths.public_file` / `paths.test_file` / `paths.out_root` | `data/processed/...`, `runs` | inputs and where run folders go |
+| `encryption.enabled` / `encryption.key_file` | `true` / `secret.key` | Fernet on every frame |
+
+**Configuration reference** (`client/config.json`):
+| Key | Shipped value | Meaning |
+|---|---|---|
+| `server_host` / `server_port` | `100.70.85.123` / `5000` | pre-filled in your bundle |
+| `client_id` | `c1..c4` | must match one of the expected ids |
+| `architecture` | `cnn` | FedAvg needs the shared model; probabilities mode allows any preset |
+| `shard_file` | `data/processed/iid/<id>.npz` | switch to `noniid/` for the second experiment |
+| `public_file` | `data/processed/public.npz` | used by probabilities mode |
+| `connect_timeout_s` / `retry_delay_s` | `10` / `3` | per-attempt timeout, pause between retries |
+| `training_override` | `null` | optional per-client overrides; official runs use the defaults |
+| `log_file` | `null` | optional client log file |
+| `out_dir` | `client_out/<id>_<timestamp>` | where the final model and round history are written |
 
 **What the connection allows:** the server accepts exactly one conversation:
 a HELLO handshake, then one UPDATE per round. Everything else — another
@@ -162,8 +198,23 @@ weights it received; `consensus_final.npy` in probabilities mode),
 - **Reconnections:** the server accepts them at any time; client identity is the
   `client_id`, never the IP, so reconnections survive a changed address.
 
+**Troubleshooting:**
+- **Port test False while the server prints `listening`:** wrong address, missing ACL grant, or the firewall rule is off. Run `tailscale ping` first, then `Test-NetConnection`; a working test shows `InterfaceAlias: Tailscale` and `SourceAddress: 100.x`.
+- **`bad handshake (connection closed by peer)` right after a port test:** normal — the test opens TCP and closes without a HELLO.
+- **`refused connection ... expected HELLO first`:** normal for probes and port tests.
+- **`unknown client_id`:** your `client_id` is not in `expected_client_ids` (`c1..c4`).
+- **`client not ready` or a public-size mismatch:** stale bundle or edited data; unzip the current bundle fresh.
+- **Architecture mismatch in FedAvg:** the client refuses with a clear message; main runs use `cnn` everywhere.
+- **`no connected clients; waiting for someone to come back`:** normal after a full drop; the server keeps listening.
+- **Slow rounds:** `tools/bench.py` gives your per-round time; typical full-size rounds take 15-30 s.
+
 **Team notes:**
 - Roles, duties, session steps: `TEAM.md`.
 - Custom client implementations are validated against `PROTOCOL.md` with
   `python tools/protocol_selftest.py --mode server` (it exercises both the
   FedAvg delta round and the probabilities rounds).
+
+**Sharing this repository:** the GitHub repository carries code and docs only —
+no shards, no `secret.key`, no run outputs, no private notes. Your shard and
+the key arrive in your private bundle; never commit `secret.key`. If a bundle
+leaks, say so in the group and the key gets rotated for everyone.
