@@ -193,8 +193,7 @@ weights it received; `consensus_final.npy` in probabilities mode),
   VPN) on all four machines, join one shared network, and share the printed
   100.x address instead. Nothing else changes; the address only goes into
   `server_host`.
-- **Campus/guest Wi-Fi:** sometimes blocks device-to-device traffic; test early,
-  keep a phone hotspot as fallback.
+- **Campus/guest Wi-Fi:** sometimes blocks device-to-device traffic, and some campuses forbid VPNs entirely — in that case use the same-network mode (a phone hotspot or the lab Wi-Fi) and leave Tailscale for off-campus. Test early; keep a hotspot as fallback.
 - **Reconnections:** the server accepts them at any time; client identity is the
   `client_id`, never the IP, so reconnections survive a changed address.
 
