@@ -139,7 +139,7 @@ Full details in `PROTOCOL.md`.
 | `rounds` | `15` | federated rounds |
 | `expected_clients` / `expected_client_ids` | `4` / `c1..c4` | who the server waits for; other ids are refused |
 | `min_clients` | `1` | below this the run does not start |
-| `start_timeout_s` | `30` | start window (code default 300) |
+| `start_timeout_s` | `300` | start window |
 | `round_timeout_s` | `90` | round window |
 | `training.*` | `local_epochs 1`, `batch 64`, `lr 1e-3`, `adam` | sent to clients in every ROUND |
 | `model.architecture` | `cnn` | shared model for FedAvg; also the server's own model |

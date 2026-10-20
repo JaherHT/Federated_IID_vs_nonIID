@@ -5,7 +5,7 @@ The reference implementation lives in `common/protocol.py`; this document is
 the contract. A client may be re-implemented, but it must match this spec
 byte for byte.
 
-**Timing:** the server opens a start window (`start_timeout_s`; 30 s in the
+**Timing:** the server opens a start window (`start_timeout_s`; 300 s in the
 shipped config) for the expected ids, then starts with whatever is connected
 (at least `min_clients`); with nobody connected it re-checks every 30 s. Each
 round stays open for at most `round_timeout_s` (90 s): missing or late updates
