@@ -176,6 +176,7 @@ against a running server.
 - `model_final.pt` — final global model
 - `consensus_final.npy` — final consensus probabilities (probabilities mode only)
 - `run_config.json` — full configuration of the run
+- `metrics.png` — automatic figure at the end of the run: global test accuracy, global test loss, per-client local accuracy, round duration (the server machine needs `matplotlib` once: `pip install matplotlib`; without it the run finishes and the figure is skipped)
 
 **Each client's copy:** on `FINISHED` a client writes
 `client_out/<client_id>_<timestamp>/` with `final_model.pt` (the final global

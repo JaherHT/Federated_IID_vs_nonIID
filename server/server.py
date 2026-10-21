@@ -144,6 +144,7 @@ class Server:
         self.clients: dict = {}
         self.events: "queue.Queue" = queue.Queue()
         self.metrics_rows: list = []
+        self.client_rows: list = []
         self.metrics_columns = [
             "round", "wall_s", "clients_alive", "updates_ok",
             "test_loss", "test_acc", "agg_norm", "dp_sigma", "epsilon_spent",
@@ -318,11 +319,24 @@ class Server:
         aux = (message or {}).get("aux") or {}
         n_train = int((message or {}).get("n_train", state.n_train))
         update_norm = aux.get("probs_norm", aux.get("delta_norm"))
+        row = {
+            "round": r,
+            "client_id": state.client_id,
+            "status": status,
+            "n_train": n_train,
+            "local_loss": aux.get("local_loss"),
+            "local_acc": aux.get("local_acc"),
+            "distill_loss": aux.get("distill_loss"),
+            "update_norm": update_norm,
+            "clipped": aux.get("clipped", ""),
+            "train_seconds": aux.get("train_seconds"),
+        }
+        self.client_rows.append(row)
         self._client_writer.writerow([
             r, state.client_id, status, n_train,
-            _fmt(aux.get("local_loss")), _fmt(aux.get("local_acc")),
-            _fmt(aux.get("distill_loss")), _fmt(update_norm),
-            aux.get("clipped", ""), _fmt(aux.get("train_seconds"), 2),
+            _fmt(row["local_loss"]), _fmt(row["local_acc"]),
+            _fmt(row["distill_loss"]), _fmt(update_norm),
+            row["clipped"], _fmt(row["train_seconds"], 2),
         ])
         self._client_file.flush()
 
@@ -613,12 +627,81 @@ class Server:
         log.info("round %d done in %.1f s | %d update(s) | test_loss=%.4f test_acc=%.4f",
                  r, elapsed, len(updates), loss, acc)
 
+    def make_plot(self) -> None:
+        """Save metrics.png: accuracy, loss, per-client accuracy, round time."""
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+        except Exception as exc:
+            log.warning("plot skipped: matplotlib is not installed (%s)", exc)
+            return
+        try:
+            rows = [r for r in self.metrics_rows if r.get("round") is not None]
+            if not rows:
+                return
+            rounds = [int(r["round"]) for r in rows]
+            acc = [float(r["test_acc"]) for r in rows]
+            loss = [float(r["test_loss"]) for r in rows]
+            wall = [float(r["wall_s"]) for r in rows]
+
+            fig, axes = plt.subplots(2, 2, figsize=(11, 7), constrained_layout=True)
+            ax_acc, ax_loss = axes[0][0], axes[0][1]
+            ax_client, ax_time = axes[1][0], axes[1][1]
+
+            ax_acc.plot(rounds, acc, marker="o", linewidth=2)
+            ax_acc.set_title("Global test accuracy")
+            ax_acc.set_xlabel("round")
+            ax_acc.set_ylabel("accuracy")
+            ax_acc.grid(alpha=0.3)
+
+            ax_loss.plot(rounds, loss, marker="o", color="tab:red", linewidth=2)
+            ax_loss.set_title("Global test loss")
+            ax_loss.set_xlabel("round")
+            ax_loss.set_ylabel("loss")
+            ax_loss.grid(alpha=0.3)
+
+            per_client: dict = {}
+            for row in self.client_rows:
+                if row.get("status") != "ok" or row.get("local_acc") in (None, ""):
+                    continue
+                try:
+                    per_client.setdefault(str(row["client_id"]), []).append(
+                        (int(row["round"]), float(row["local_acc"])))
+                except (TypeError, ValueError):
+                    continue
+            for client_id, points in sorted(per_client.items()):
+                ax_client.plot([p[0] for p in points], [p[1] for p in points],
+                               marker=".", linewidth=1.4, label=client_id)
+            if per_client:
+                ax_client.legend(title="client", fontsize=8)
+            ax_client.set_title("Client local accuracy")
+            ax_client.set_xlabel("round")
+            ax_client.set_ylabel("accuracy")
+            ax_client.grid(alpha=0.3)
+
+            ax_time.bar(rounds[1:], wall[1:], color="tab:gray")
+            ax_time.set_title("Round duration")
+            ax_time.set_xlabel("round")
+            ax_time.set_ylabel("seconds")
+            ax_time.grid(alpha=0.3)
+
+            fig.suptitle(f"{self.strategy}: {len(rounds) - 1} rounds, "
+                         f"final test accuracy {acc[-1]:.3f}")
+            path = self.out_dir / "metrics.png"
+            fig.savefig(path, dpi=150)
+            plt.close(fig)
+            log.info("saved plot: %s", path)
+        except Exception as exc:
+            log.warning("plot skipped: %s", exc)
+
     def finish(self) -> None:
         torch.save(self.model.state_dict(), self.out_dir / "model_final.pt")
         log.info("saved final model: %s", self.out_dir / "model_final.pt")
         if self.consensus is not None:
             np.save(self.out_dir / "consensus_final.npy", self.consensus)
             log.info("saved final consensus: %s", self.out_dir / "consensus_final.npy")
+        self.make_plot()
         payload = {"type": "FINISHED", "round": self.rounds}
         if self.strategy == "fedavg":
             payload["weights"] = self._weights_np()
