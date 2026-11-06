@@ -68,6 +68,7 @@ connection (see "What the server accepts").
 | n_train   | int  | local training samples, 1..10,000,000 (aggregation weight)  |
 | ready     | bool | must be true: model and data loaded before connecting       |
 | arch      | str  | short architecture name, 1..64 chars, e.g. "cnn"            |
+| partition | str  | optional, <=32 chars: "iid" / "non-iid" / "unknown"; only labels the run (figure title, run_config, summary), never affects aggregation |
 
 In FedAvg mode the server compares `arch` with its shared model and logs a
 warning on mismatch; the client refuses to join when WELCOME announces a

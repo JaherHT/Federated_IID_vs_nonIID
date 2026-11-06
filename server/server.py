@@ -69,6 +69,7 @@ class ClientState:
     connected_at: float
     dead: bool = False
     misses: int = 0
+    partition: str = ""  # "iid" / "non-iid" / "unknown", reported by the client
 
 
 class ClientReader(threading.Thread):
@@ -149,6 +150,8 @@ class Server:
             "round", "wall_s", "clients_alive", "updates_ok",
             "test_loss", "test_acc", "agg_norm", "dp_sigma", "epsilon_spent",
         ]
+        self.end_reason = "completed"  # or "interrupted" / "error", set in run()
+        self._plot_done = False
 
     # ------------------------------------------------------------------ setup
     def setup_logging(self) -> None:
@@ -178,6 +181,14 @@ class Server:
     def alive(self) -> list:
         return [s for s in self.clients.values() if not s.dead]
 
+    def partition_label(self) -> str:
+        """One label when every reporting client agrees, "mixed" when they do not."""
+        parts = {s.partition for s in self.clients.values()
+                 if s.partition and s.partition != "unknown"}
+        if len(parts) == 1:
+            return parts.pop()
+        return "mixed" if parts else ""
+
     def mark_dead(self, state: ClientState, reason: str) -> None:
         if state.dead:
             return
@@ -206,6 +217,9 @@ class Server:
         arch = hello.get("arch")
         if not isinstance(arch, str) or not (0 < len(arch) <= 64):
             return f"bad arch descriptor {arch!r}"
+        part = hello.get("partition")
+        if part is not None and (not isinstance(part, str) or len(part) > 32):
+            return f"bad partition descriptor {part!r}"
         return ""
 
     def accept_one(self, listener: socket.socket) -> bool:
@@ -228,7 +242,8 @@ class Server:
             return False
         cid = str(hello["client_id"])
         sock.settimeout(None)
-        state = ClientState(cid, conn, int(hello["n_train"]), str(hello["arch"]), time.time())
+        state = ClientState(cid, conn, int(hello["n_train"]), str(hello["arch"]), time.time(),
+                            partition=str(hello.get("partition") or ""))
         old = self.clients.get(cid)
         if old is not None:
             was = "was marked offline" if old.dead else "replacing previous connection"
@@ -237,7 +252,8 @@ class Server:
             old.conn.close()
         self.clients[cid] = state
         ClientReader(state, self.events).start()
-        log.info("client %s connected from %s (n_train=%d, arch=%s)", cid, addr[0], state.n_train, state.arch)
+        log.info("client %s connected from %s (n_train=%d, arch=%s, partition=%s)",
+                 cid, addr[0], state.n_train, state.arch, state.partition or "unreported")
         if self.strategy == "fedavg" and state.arch != self.model_arch:
             log.warning("client %s runs arch=%s but FedAvg needs the shared model '%s' on every client",
                         cid, state.arch, self.model_arch)
@@ -348,6 +364,7 @@ class Server:
             "model_architecture": self.model_arch,
             "model_params": self.model_params,
             "public_samples": self.n_public,
+            "client_partitions": {cid: s.partition for cid, s in sorted(self.clients.items()) if s.partition},
         }
         (self.out_dir / "run_config.json").write_text(json.dumps(meta, indent=2), encoding="utf-8")
 
@@ -365,6 +382,8 @@ class Server:
                 "best_test_acc": best,
                 "clients_seen": {cid: s.arch for cid, s in sorted(self.clients.items())},
                 "misses_per_client": {s.client_id: s.misses for s in self.clients.values()},
+                "client_partitions": {cid: s.partition for cid, s in sorted(self.clients.items()) if s.partition},
+                "ended": {"reason": self.end_reason, "round": int(final.get("round", 0))},
             }
             if self.dp_enabled:
                 summary["privacy"] = {
@@ -628,72 +647,35 @@ class Server:
                  r, elapsed, len(updates), loss, acc)
 
     def make_plot(self) -> None:
-        """Save metrics.png: accuracy, loss, per-client accuracy, round time."""
-        try:
-            import matplotlib
-            matplotlib.use("Agg")
-            import matplotlib.pyplot as plt
-        except Exception as exc:
-            log.warning("plot skipped: matplotlib is not installed (%s)", exc)
+        """Save metrics.png: global curves, client curves, timings, participation.
+
+        Drawn by common.figures. Called at the end of a run and again from the
+        finally block, so a run stopped with Ctrl-C (or by an exception) still
+        gets a figure with the stop point marked.
+        """
+        if self._plot_done:
             return
+        self._plot_done = True
+        if not self.metrics_rows:
+            log.warning("plot skipped: no metrics recorded")
+            return
+        last_round = int(self.metrics_rows[-1].get("round", 0) or 0)
         try:
-            rows = [r for r in self.metrics_rows if r.get("round") is not None]
-            if not rows:
-                return
-            rounds = [int(r["round"]) for r in rows]
-            acc = [float(r["test_acc"]) for r in rows]
-            loss = [float(r["test_loss"]) for r in rows]
-            wall = [float(r["wall_s"]) for r in rows]
-
-            fig, axes = plt.subplots(2, 2, figsize=(11, 7), constrained_layout=True)
-            ax_acc, ax_loss = axes[0][0], axes[0][1]
-            ax_client, ax_time = axes[1][0], axes[1][1]
-
-            ax_acc.plot(rounds, acc, marker="o", linewidth=2)
-            ax_acc.set_title("Global test accuracy")
-            ax_acc.set_xlabel("round")
-            ax_acc.set_ylabel("accuracy")
-            ax_acc.grid(alpha=0.3)
-
-            ax_loss.plot(rounds, loss, marker="o", color="tab:red", linewidth=2)
-            ax_loss.set_title("Global test loss")
-            ax_loss.set_xlabel("round")
-            ax_loss.set_ylabel("loss")
-            ax_loss.grid(alpha=0.3)
-
-            per_client: dict = {}
-            for row in self.client_rows:
-                if row.get("status") != "ok" or row.get("local_acc") in (None, ""):
-                    continue
-                try:
-                    per_client.setdefault(str(row["client_id"]), []).append(
-                        (int(row["round"]), float(row["local_acc"])))
-                except (TypeError, ValueError):
-                    continue
-            for client_id, points in sorted(per_client.items()):
-                ax_client.plot([p[0] for p in points], [p[1] for p in points],
-                               marker=".", linewidth=1.4, label=client_id)
-            if per_client:
-                ax_client.legend(title="client", fontsize=8)
-            ax_client.set_title("Client local accuracy")
-            ax_client.set_xlabel("round")
-            ax_client.set_ylabel("accuracy")
-            ax_client.grid(alpha=0.3)
-
-            ax_time.bar(rounds[1:], wall[1:], color="tab:gray")
-            ax_time.set_title("Round duration")
-            ax_time.set_xlabel("round")
-            ax_time.set_ylabel("seconds")
-            ax_time.grid(alpha=0.3)
-
-            fig.suptitle(f"{self.strategy}: {len(rounds) - 1} rounds, "
-                         f"final test accuracy {acc[-1]:.3f}")
-            path = self.out_dir / "metrics.png"
-            fig.savefig(path, dpi=150)
-            plt.close(fig)
-            log.info("saved plot: %s", path)
-        except Exception as exc:
+            from common.figures import render_run_figure
+            path = render_run_figure(
+                self.out_dir, self.metrics_rows, self.client_rows,
+                strategy=self.strategy,
+                expected_client_ids=self.expected_ids,
+                expected_clients=self.expected_clients,
+                round_timeout_s=self.round_timeout_s,
+                end_reason=self.end_reason,
+                end_round=last_round,
+                partition=self.partition_label(),
+            )
+        except Exception as exc:  # missing matplotlib, empty run, anything
             log.warning("plot skipped: %s", exc)
+            return
+        log.info("saved plot: %s", path)
 
     def finish(self) -> None:
         torch.save(self.model.state_dict(), self.out_dir / "model_final.pt")
@@ -751,12 +733,18 @@ class Server:
                 log.info("privacy spent: epsilon ~= %.2f at delta=%.1e over %d rounds (basic composition)",
                          (self.eps_round or 0) * self.rounds, self.dp_target_delta, self.rounds)
         except KeyboardInterrupt:
+            self.end_reason = "interrupted"
             log.warning("interrupted by user")
+        except Exception:
+            self.end_reason = "error"
+            log.exception("run aborted by an uncaught error")
+            raise
         finally:
             for state in self.clients.values():
                 state.conn.close()
             listener.close()
             self.write_summary()
+            self.make_plot()  # a stopped run still gets a figure, with the stop marked
             for attr in ("_metrics_file", "_client_file"):
                 handle = getattr(self, attr, None)
                 if handle is not None:

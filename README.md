@@ -119,6 +119,7 @@ update norm, participation), `summary.json`, `model_final.pt`, and
 - **Reconnections:** a reconnected client simply continues; the next ROUND
   carries the current state (weights or consensus) and nothing else needs
   reconciling.
+- **Partition label:** HELLO carries `partition` (`iid` / `non-iid`), taken from `partition` in the client config or inferred from the shard path (`data/processed/iid/...` vs `data/processed/noniid/...`). The server stores it in `run_config.json` and `summary.json` and prints it in the figure title. It is a label only: aggregation ignores it, and a client that omits it still joins.
 - **Never exchanged:** raw data, labels, another client's update.
 
 Full details in `PROTOCOL.md`.
@@ -130,6 +131,7 @@ Full details in `PROTOCOL.md`.
 - **Nobody connected:** between rounds the server idles (`no connected clients; waiting for someone to come back`), keeps the port open and accepts reconnections at any time.
 - **Mid-round join:** a client that connects during a round is welcomed immediately and joins at the next round; the current round is neither extended nor restarted.
 - **End of run:** `FINISHED` carries the final weights (FedAvg) or consensus (probabilities) plus `final_test_acc`; each client writes `client_out/` and exits.
+- **Server stops or dies:** clients never give up. Every failed connection logs `connection problem (...)` and retries after `retry_delay_s` (3 s) until the server is back or the user presses Ctrl-C. There is no checkpoint, so a restarted server is a new run: it starts at round 0 with an untrained proxy, and a client that re-joins adopts whatever state the new run sends (its local history then holds repeated round numbers). Ctrl-C or an exception writes `summary.json` (`ended.reason`) and `metrics.png` with the stop point marked; a hard kill or power loss leaves only the CSV rows already flushed.
 
 **Configuration reference** (`server/config.json`):
 | Key | Shipped value | Meaning |
@@ -153,6 +155,7 @@ Full details in `PROTOCOL.md`.
 | `client_id` | `c1..c4` | must match one of the expected ids |
 | `architecture` | `cnn` | FedAvg needs the shared model; probabilities mode allows any preset |
 | `shard_file` | `data/processed/iid/<id>.npz` | switch to `noniid/` for the second experiment |
+| `partition` | inferred from `shard_file` | optional `iid` / `non-iid`; reported in HELLO and printed in the figure title. Inference reads the path (`iid/` vs `noniid/`), so switching `shard_file` is usually enough |
 | `public_file` | `data/processed/public.npz` | used by probabilities mode |
 | `connect_timeout_s` / `retry_delay_s` | `10` / `3` | per-attempt timeout, pause between retries |
 | `training_override` | `null` | optional per-client overrides; official runs use the defaults |
@@ -172,11 +175,11 @@ against a running server.
 - `server.log` — full log of the run (including every disconnect/rejoin)
 - `metrics.csv` — round, wall time, participants, global-model test loss/accuracy
 - `client_metrics.csv` — per client per round: status (ok/miss/dead/bad-update), losses, update norm, clipping
-- `summary.json` — final numbers, strategy, per-client miss counts
+- `summary.json` — final numbers, strategy, per-client miss counts, and `ended` (reason: completed/interrupted/error + last round)
 - `model_final.pt` — final global model
 - `consensus_final.npy` — final consensus probabilities (probabilities mode only)
 - `run_config.json` — full configuration of the run
-- `metrics.png` — automatic figure at the end of the run: global test accuracy, global test loss, per-client local accuracy, round duration (the server machine needs `matplotlib` once: `pip install matplotlib`; without it the run finishes and the figure is skipped)
+- `metrics.png` — automatic figure: global test accuracy and loss (rounds that lost a client shaded), per-client local accuracy (line broken at every missed round), round duration (bars coloured when a client was missing), and a client-by-round participation matrix (answered / missed / dropped / rejected / no data); the title carries the strategy and the IID/non-IID partition reported by the clients. A run stopped with Ctrl-C or killed by an exception still gets this figure, with the stop point marked and `summary.json` saying `interrupted`; hard-killing the process writes neither. Redraw or restyle it from the CSVs without re-running: `python tools/replot.py runs/<timestamp>` (partition from `client_partitions` in the artifacts, else a `figure_meta.json` sidecar, else `--partition iid|non-iid`; `--label` adds free text, `--dpi` sets the resolution). The server machine needs `matplotlib` once (`pip install matplotlib`); clients never need it.
 
 **Each client's copy:** on `FINISHED` a client writes
 `client_out/<client_id>_<timestamp>/` with `final_model.pt` (the final global

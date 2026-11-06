@@ -49,6 +49,16 @@ def _f(value):
     return None if value is None else float(value)
 
 
+def partition_of(shard_file: str) -> str:
+    """IID/non-IID label carried by the shard path (data/processed/iid/...)."""
+    lowered = str(shard_file).replace("\\", "/").lower()
+    if "noniid" in lowered or "non-iid" in lowered or "non_iid" in lowered:
+        return "non-iid"
+    if "iid" in lowered:
+        return "iid"
+    return "unknown"
+
+
 class Client:
     def __init__(self, cfg: dict):
         self.cfg = cfg
@@ -57,6 +67,7 @@ class Client:
         self.client_id = str(cfg["client_id"])
         self.arch = str(cfg.get("architecture", "cnn"))
         self.shard_file = str(cfg.get("shard_file", f"data/processed/iid/{self.client_id}.npz"))
+        self.partition = str(cfg.get("partition") or partition_of(self.shard_file))
         self.public_file = str(cfg.get("public_file", "data/processed/public.npz"))
         self.connect_timeout_s = float(cfg.get("connect_timeout_s", 10))
         self.retry_delay_s = float(cfg.get("retry_delay_s", 3))
@@ -88,8 +99,8 @@ class Client:
             handler.setFormatter(fmt)
         logger_root.handlers[:] = handlers
 
-        log.info("config: server=%s:%d arch=%s | shard=%s (%d samples) | public=%s (%d samples) | %d params",
-                 self.host, self.port, self.arch, self.shard_file, self.n_train,
+        log.info("config: server=%s:%d arch=%s | shard=%s (%d samples, %s) | public=%s (%d samples) | %d params",
+                 self.host, self.port, self.arch, self.shard_file, self.n_train, self.partition,
                  self.public_file, int(self.public_X.shape[0]), param_count(self.model))
 
     # -------------------------------------------------------------- training
@@ -359,6 +370,7 @@ class Client:
                 "proto": protocol.PROTO_VERSION,
                 "client_id": self.client_id,
                 "n_train": int(self.n_train),
+                "partition": self.partition,
                 "ready": True,
                 "arch": self.arch,
             })
